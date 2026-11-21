@@ -235,7 +235,10 @@ class KeyListView(discord.ui.LayoutView):
 class KeyLock(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        # members intent required for fetch_member / role management.
+        # Must be enabled in Discord Dev Portal -> Bot -> Privileged Gateway Intents.
         intents.members = True
+        intents.message_content = False
         super().__init__(command_prefix="kl!", intents=intents)
 
     async def setup_hook(self):
