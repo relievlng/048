@@ -200,11 +200,8 @@ class StaffBot(discord.Client):
 
     async def _setup_log_channels(self):
         """Create log channel structure in staff Discord and generate webhooks.
-        Runs once on startup. Writes webhook URLs to /data/webhooks.env and logs them."""
-        SENTINEL = "/data/.logdash_setup_done"
-        if os.path.exists(SENTINEL):
-            log.info("[setup] Log channels already set up, skipping.")
-            return
+        Runs on every boot - skips channels/webhooks that already exist so it
+        is safe to re-run after adding new channels to STRUCTURE."""
 
         STRUCTURE = [
             {"name": "MAIN BOT LOGS",     "key": "MAIN",     "channels": [
@@ -253,9 +250,16 @@ class StaffBot(discord.Client):
                     else:
                         log.info("[setup]     Channel #%s exists", ch_name)
 
-                    wh = await ch_obj.create_webhook(name=f"LogDash-{sec['key']}")
+                    # Reuse existing LogDash webhook if present, create if not
+                    existing_whs = await ch_obj.webhooks()
+                    logdash_wh = next((w for w in existing_whs if w.name.startswith("LogDash-")), None)
+                    if logdash_wh:
+                        wh = logdash_wh
+                        log.info("[setup]     Webhook exists: %s", env_key)
+                    else:
+                        wh = await ch_obj.create_webhook(name=f"LogDash-{sec['key']}")
+                        log.info("[setup]     Webhook created: %s=%s", env_key, wh.url)
                     webhooks[env_key] = wh.url
-                    log.info("[setup]     Webhook: %s=%s", env_key, wh.url)
                     await asyncio.sleep(0.3)
 
             # Write to persistent volume
@@ -271,10 +275,7 @@ class StaffBot(discord.Client):
                 log.info("[setup] %s=%s", k, v)
             log.info("[setup] ===== END WEBHOOK VARS =====")
 
-            # Mark done
-            with open(SENTINEL, "w") as f:
-                f.write("done\n")
-            log.info("[setup] Setup complete. %d webhooks created.", len(webhooks))
+            log.info("[setup] Setup complete. %d webhooks tracked.", len(webhooks))
 
         except Exception as exc:
             log.error("[setup] Setup failed: %s", exc, exc_info=True)
