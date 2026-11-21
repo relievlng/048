@@ -34,16 +34,17 @@ def env_int(key: str, default: int = 0) -> int:
         return default
 
 CONFIG = {
-    "token":            env("DISCORD_TOKEN",        "YOUR_BOT_TOKEN"),
-    "guild_id":         env_int("GUILD_ID"),
-    "admin_role_id":    env_int("ADMIN_ROLE_ID"),
-    "log_channel_id":   env_int("LOG_CHANNEL_ID"),
-    "verified_role_id": env_int("VERIFIED_ROLE_ID"),
-    "banned_role_id":   env_int("BANNED_ROLE_ID"),
-    "db_path":          env("DB_PATH",              "/data/keylock.db"),
-    "max_hwid_resets":  env_int("MAX_HWID_RESETS",  1),
-    "key_prefix":       env("KEY_PREFIX",           "KL"),
-    "api_port":         env_int("PORT",             8080),
+    "token":               env("DISCORD_TOKEN",        "YOUR_BOT_TOKEN"),
+    "guild_id":            env_int("GUILD_ID"),
+    "admin_role_id":       env_int("ADMIN_ROLE_ID"),
+    "log_channel_id":      env_int("LOG_CHANNEL_ID"),
+    "loader_log_channel_id": env_int("LOADER_LOG_CHANNEL_ID"),  # separate channel for all loader events
+    "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
+    "banned_role_id":      env_int("BANNED_ROLE_ID"),
+    "db_path":             env("DB_PATH",              "/data/keylock.db"),
+    "max_hwid_resets":     env_int("MAX_HWID_RESETS",  1),
+    "key_prefix":          env("KEY_PREFIX",           "KL"),
+    "api_port":            env_int("PORT",             8080),
 }
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
@@ -78,7 +79,9 @@ def init_db(path: str) -> sqlite3.Connection:
             last_seen       TEXT,
             ip_last         TEXT,
             notes           TEXT,
-            ban_reason      TEXT
+            ban_reason      TEXT,
+            fac_reset_auth  INTEGER NOT NULL DEFAULT 0,
+            fac_auth_key    TEXT
         );
         CREATE TABLE IF NOT EXISTS key_pool (
             key         TEXT PRIMARY KEY,
@@ -126,6 +129,18 @@ def init_db(path: str) -> sqlite3.Connection:
         log.info("Migration: added key_pool.visibility column")
     except Exception:
         pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN fac_reset_auth INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        log.info("Migration: added users.fac_reset_auth column")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN fac_auth_key TEXT")
+        conn.commit()
+        log.info("Migration: added users.fac_auth_key column")
+    except Exception:
+        pass
     log.info("Database ready: %s", path)
     return conn
 
@@ -159,6 +174,12 @@ def gen_key(prefix: str = "KL", segments: int = 4, seg_len: int = 5) -> str:
     charset = string.ascii_uppercase + string.digits
     parts = ["".join(secrets.choice(charset) for _ in range(seg_len)) for _ in range(segments)]
     return f"{prefix}-" + "-".join(parts)
+
+def gen_fac_key() -> str:
+    """Generate a unique FAC authorization key shown in the internal system."""
+    charset = string.ascii_uppercase + string.digits
+    token = "".join(secrets.choice(charset) for _ in range(16))
+    return f"FAC-{token[:4]}-{token[4:8]}-{token[8:12]}-{token[12:16]}"
 
 def is_expired(row) -> bool:
     if not row["expires_at"]:
@@ -380,45 +401,40 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
     did = str(i.user.id)
 
     if DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        view = SimpleView(
-            discord.Color.orange(),
-            "**Already Registered**",
-            "Your Discord account already has an active license.",
-            "Use `/mystatus` to check it."
-        )
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Already Registered", color=discord.Color.orange(),
+            description="Your account already has an active license.\nUse `/mystatus` to check it.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     pool = DB.execute("SELECT * FROM key_pool WHERE key=? AND claimed=0", (key.strip().upper(),)).fetchone()
     if not pool:
         audit("REGISTER_FAIL_BAD_KEY", actor_id=did, detail=f"key={key[:20]}")
-        view = SimpleView(
-            discord.Color.red(),
-            "**Invalid Key**",
-            "That key doesn't exist or has already been used.",
-            "Contact support if you think this is a mistake."
-        )
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Invalid Key", color=discord.Color.red(),
+            description="That key doesn't exist or has already been used.\nContact support if you think this is a mistake.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     if DB.execute("SELECT 1 FROM users WHERE key=?", (key.strip().upper(),)).fetchone():
         audit("REGISTER_FAIL_KEY_TAKEN", actor_id=did)
-        view = SimpleView(discord.Color.red(), "**Key Taken**", "That key is already registered to another account.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Key Taken", color=discord.Color.red(),
+            description="That key is already registered to another account.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     hashed = hash_hwid(hwid)
     if DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (hashed,)).fetchone():
         audit("REGISTER_FAIL_HWID_BANNED", actor_id=did)
-        view = SimpleView(discord.Color.red(), "**Hardware Banned**", "Your hardware ID is banned. Contact support.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Hardware Banned", color=discord.Color.red(),
+            description="Your hardware ID is banned. Contact support.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     if pool["expires_at"]:
         try:
             if datetime.now(timezone.utc) > datetime.fromisoformat(pool["expires_at"]):
-                view = SimpleView(discord.Color.orange(), "**Key Expired**", "That key has expired. Contact support.")
-                await i.followup.send(**cv2_send(view), ephemeral=True)
+                e = discord.Embed(title="Key Expired", color=discord.Color.orange(),
+                    description="That key has expired. Contact support.")
+                await i.followup.send(embed=e, ephemeral=True)
                 return
         except Exception:
             pass
@@ -434,35 +450,24 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
         vr = i.guild.get_role(CONFIG["verified_role_id"])
         if vr:
             await i.user.add_roles(vr, reason="KeyLock: registered")
-    except Exception as e:
-        log.warning("Role grant failed: %s", e)
+    except Exception as ex:
+        log.warning("Role grant failed: %s", ex)
 
     audit("REGISTER_SUCCESS", actor_id=did, detail=f"key={key[:20]} product={pool['product']}")
 
-    max_r = CONFIG["max_hwid_resets"]
-    view = StatusView(
-        discord.Color.green(),
-        "License Activated",
-        [
-            ("Product", pool["product"]),
-            ("Expires", fmt_dt(pool["expires_at"])),
-            ("HWID Resets", str(max_r)),
-            ("Auth Method", "Your **Discord ID** is now your license.\nKeep your account secure."),
-        ],
-        footer=f"{i.user} - {i.user.id}"
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    prod_icon = "🌐" if pool["product"] == "public" else "🔒"
+    e = discord.Embed(title="License Activated", color=discord.Color.green())
+    e.add_field(name="Product", value=f"{prod_icon} {pool['product']}", inline=True)
+    e.add_field(name="Expires", value=fmt_dt(pool["expires_at"]), inline=True)
+    e.add_field(name="Auth", value="Your Discord ID is now your license. Keep your account secure.", inline=False)
+    e.set_footer(text=f"{i.user} - {i.user.id}")
+    await i.followup.send(embed=e, ephemeral=True)
 
-    log_view = StatusView(
-        discord.Color.green(),
-        "New Registration",
-        [
-            ("User", f"<@{did}> ({did})"),
-            ("Product", pool["product"]),
-            ("Expires", fmt_dt(pool["expires_at"])),
-        ]
-    )
-    await BOT.log_embed(log_view)
+    log_e = discord.Embed(title="New Registration", color=discord.Color.green())
+    log_e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    log_e.add_field(name="Product", value=pool["product"], inline=True)
+    log_e.add_field(name="Expires", value=fmt_dt(pool["expires_at"]), inline=True)
+    await BOT.log_embed(log_e)
 
 
 @app_commands.command(name="mystatus", description="Check your license status.")
@@ -470,89 +475,26 @@ async def cmd_mystatus(i: discord.Interaction):
     await i.response.defer(ephemeral=True)
     row = DB.execute("SELECT * FROM users WHERE discord_id=?", (str(i.user.id),)).fetchone()
     if not row:
-        view = SimpleView(
-            discord.Color.red(),
-            "**Not Registered**",
-            "You don't have a license yet.",
-            "Use `/register <key> <hwid>` to get started."
-        )
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="You don't have a license yet. Contact an admin to get one.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     s = effective_status(row)
-    resets_left = max(0, CONFIG["max_hwid_resets"] - row["hwid_resets"])
-    fields = [
-        ("Status", f"{status_emoji(s)} {s.upper()}"),
-        ("Product", row["product"]),
-        ("Expires", fmt_dt(row["expires_at"])),
-        ("Registered", fmt_dt(row["registered_at"])),
-        ("Last Seen", fmt_ts(row["last_seen"])),
-        ("HWID Resets Left", str(resets_left)),
-    ]
+    prod_icon = "🌐" if row["product"] == "public" else "🔒"
+    e = discord.Embed(title="Your License", color=status_color(s))
+    e.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
+    e.add_field(name="Product", value=f"{prod_icon} {row['product']}", inline=True)
+    e.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
+    e.add_field(name="Registered", value=fmt_dt(row["registered_at"]), inline=True)
+    e.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
     if row["ban_reason"]:
-        fields.append(("Reason", row["ban_reason"]))
+        e.add_field(name="Reason", value=row["ban_reason"], inline=False)
+    e.set_footer(text=f"ID: {i.user.id}")
+    await i.followup.send(embed=e, ephemeral=True)
 
-    view = StatusView(status_color(s), "Your License", fields, footer=f"ID: {i.user.id}")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
 
-
-@app_commands.command(name="resetmyhwid",
-    description="Swap your HWID to a new machine (limited uses).")
-@app_commands.describe(new_hwid="Your new Hardware ID from the launcher")
-async def cmd_resetmyhwid(i: discord.Interaction, new_hwid: str):
-    await i.response.defer(ephemeral=True)
-    did = str(i.user.id)
-    max_r = CONFIG["max_hwid_resets"]
-    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
-
-    if not row:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**", "You don't have a license.")), ephemeral=True)
-        return
-
-    s = effective_status(row)
-    if s in ("banned", "revoked", "expired"):
-        view = SimpleView(discord.Color.red(), f"**Account {s.upper()}**", "Contact an admin for help.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
-        return
-
-    if row["hwid_resets"] >= max_r:
-        audit("HWID_RESET_DENIED", actor_id=did, detail=f"at max {max_r}")
-        view = SimpleView(
-            discord.Color.red(),
-            "**No Resets Left**",
-            f"You have used all `{max_r}` HWID reset(s).",
-            "Contact an admin for a manual reset."
-        )
-        await i.followup.send(**cv2_send(view), ephemeral=True)
-        return
-
-    hashed = hash_hwid(new_hwid)
-    if DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (hashed,)).fetchone():
-        view = SimpleView(discord.Color.red(), "**Hardware Banned**", "That hardware ID is banned.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
-        return
-
-    DB.execute("UPDATE users SET hwid=?, hwid_resets=hwid_resets+1 WHERE discord_id=?", (hashed, did))
-    DB.commit()
-    audit("HWID_RESET_USER", actor_id=did, detail=f"reset #{row['hwid_resets']+1}")
-
-    remaining = max_r - row["hwid_resets"] - 1
-    view = StatusView(
-        discord.Color.orange(),
-        "HWID Updated",
-        [
-            ("New Machine", "Bound successfully"),
-            ("Resets Remaining", str(remaining)),
-            ("Next Step", "Launch the software on your new machine."),
-        ]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-
-    log_view = StatusView(
-        discord.Color.orange(), "HWID Reset (User)",
-        [("User", f"<@{did}> ({did})"), ("Resets Left", str(remaining))]
-    )
-    await BOT.log_embed(log_view)
+# /resetmyhwid removed - members cannot self-reset HWID. Admins use /resethwid.
 
 
 # ─── ADMIN COMMANDS ───────────────────────────────────────────────────────────
@@ -690,8 +632,9 @@ async def cmd_lookup(i: discord.Interaction, query: str):
         DB.execute("SELECT * FROM users WHERE key=?", (query.strip().upper(),)).fetchone()
     )
     if not row:
-        view = SimpleView(discord.Color.red(), "**Not Found**", "No user matched that query.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Not Found", color=discord.Color.red(),
+            description="No user matched that query.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     s = effective_status(row)
@@ -701,38 +644,70 @@ async def cmd_lookup(i: discord.Interaction, query: str):
     except Exception:
         user_str = f"`{row['discord_id']}`"
 
-    fields = [
-        ("Discord", user_str),
-        ("Key", f"`{row['key']}`"),
-        ("Status", f"{status_emoji(s)} {s.upper()}"),
-        ("Product", row["product"]),
-        ("Expires", fmt_dt(row["expires_at"])),
-        ("Registered", fmt_dt(row["registered_at"])),
-        ("Last Seen", fmt_ts(row["last_seen"])),
-        ("Last IP", row["ip_last"] or "N/A"),
-        ("HWID Bound", "Yes" if row["hwid"] else "No"),
-        ("HWID Resets Used", str(row["hwid_resets"])),
-    ]
+    prod_icon = "🌐" if row["product"] == "public" else "🔒"
+    e = discord.Embed(title="User Lookup", color=status_color(s))
+    e.add_field(name="Discord", value=user_str, inline=False)
+    e.add_field(name="Key", value=f"`{row['key']}`", inline=False)
+    e.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
+    e.add_field(name="Product", value=f"{prod_icon} {row['product']}", inline=True)
+    e.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
+    e.add_field(name="Registered", value=fmt_dt(row["registered_at"]), inline=True)
+    e.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
+    e.add_field(name="Last IP", value=row["ip_last"] or "N/A", inline=True)
+    e.add_field(name="HWID Bound", value="Yes" if row["hwid"] else "No", inline=True)
+    e.add_field(name="HWID Resets Used", value=str(row["hwid_resets"]), inline=True)
     if row["ban_reason"]:
-        fields.append(("Ban Reason", row["ban_reason"]))
+        e.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
     if row["notes"]:
-        fields.append(("Notes", row["notes"][-300:]))
-
-    view = StatusView(status_color(s), "User Lookup", fields)
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+        e.add_field(name="Notes", value=row["notes"][-300:], inline=False)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
-@app_commands.command(name="ban", description="[ADMIN] Ban a user's license.")
+@app_commands.command(name="ban", description="[ADMIN] Ban a user - blocks loader, bans HWID + IP, kicks from server.")
 @app_commands.describe(user="Target user", reason="Ban reason")
 @admin_only()
 async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
-    if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**", "User has no license.")), ephemeral=True)
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    if not row:
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
-    DB.execute("UPDATE users SET status='banned', ban_reason=? WHERE discord_id=?", (reason or "No reason given", did))
+
+    ban_reason = reason or "No reason given"
+
+    # 1 - Mark license banned
+    DB.execute("UPDATE users SET status='banned', ban_reason=? WHERE discord_id=?", (ban_reason, did))
+
+    # 2 - Ban HWID if bound
+    hwid_banned = False
+    if row["hwid"]:
+        try:
+            DB.execute(
+                "INSERT OR IGNORE INTO hwid_bans (hwid,reason,banned_at,banned_by) VALUES (?,?,?,?)",
+                (row["hwid"], f"Auto: user ban - {ban_reason}", now_iso(), str(i.user.id))
+            )
+            hwid_banned = True
+        except Exception as ex:
+            log.warning("HWID ban during user ban failed: %s", ex)
+
+    # 3 - Ban IP if on record
+    ip_banned = False
+    if row["ip_last"]:
+        try:
+            DB.execute(
+                "INSERT OR IGNORE INTO hwid_bans (hwid,reason,banned_at,banned_by) VALUES (?,?,?,?)",
+                (f"IP:{row['ip_last']}", f"Auto: user ban - {ban_reason}", now_iso(), str(i.user.id))
+            )
+            ip_banned = True
+        except Exception as ex:
+            log.warning("IP ban during user ban failed: %s", ex)
+
     DB.commit()
+
+    # 4 - Strip roles + add banned role
     try:
         vr = i.guild.get_role(CONFIG["verified_role_id"])
         br = i.guild.get_role(CONFIG["banned_role_id"])
@@ -742,13 +717,30 @@ async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional
             await user.add_roles(br, reason="KeyLock ban")
     except Exception:
         pass
-    audit("BAN", actor_id=str(i.user.id), target_id=did, detail=reason or "No reason")
-    view = StatusView(
-        discord.Color.red(), "User Banned",
-        [("User", f"<@{did}> ({did})"), ("Reason", reason or "None"), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_embed(view)
+
+    # 5 - Kick from server
+    kicked = False
+    try:
+        await user.kick(reason=f"KeyLock ban: {ban_reason}")
+        kicked = True
+    except Exception as ex:
+        log.warning("Kick failed for %s: %s", did, ex)
+
+    audit("BAN", actor_id=str(i.user.id), target_id=did, detail=ban_reason)
+
+    actions = []
+    actions.append("License blocked")
+    if hwid_banned: actions.append("HWID banned")
+    if ip_banned:   actions.append(f"IP banned ({row['ip_last']})")
+    if kicked:      actions.append("Kicked from server")
+
+    e = discord.Embed(title="User Banned", color=discord.Color.red())
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="Reason", value=ban_reason, inline=False)
+    e.add_field(name="Actions Taken", value="\n".join(f"- {a}" for a in actions), inline=False)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
 
 
 @app_commands.command(name="unban", description="[ADMIN] Unban a user's license.")
@@ -758,7 +750,9 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**", "User has no license.")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     DB.execute("UPDATE users SET status='active', ban_reason=NULL WHERE discord_id=?", (did,))
     DB.commit()
@@ -772,12 +766,11 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
     except Exception:
         pass
     audit("UNBAN", actor_id=str(i.user.id), target_id=did)
-    view = StatusView(
-        discord.Color.green(), "User Unbanned",
-        [("User", f"<@{did}> ({did})"), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_embed(view)
+    e = discord.Embed(title="User Unbanned", color=discord.Color.green())
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
 
 
 @app_commands.command(name="revoke", description="[ADMIN] Permanently revoke a license.")
@@ -787,7 +780,9 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**", "User has no license.")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     DB.execute("UPDATE users SET status='revoked', ban_reason=? WHERE discord_id=?", (reason or "Revoked", did))
     DB.commit()
@@ -798,12 +793,12 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
     except Exception:
         pass
     audit("REVOKE", actor_id=str(i.user.id), target_id=did, detail=reason)
-    view = StatusView(
-        discord.Color.dark_gray(), "License Revoked",
-        [("User", f"<@{did}> ({did})"), ("Reason", reason or "None"), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_embed(view)
+    e = discord.Embed(title="License Revoked", color=discord.Color.dark_gray())
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="Reason", value=reason or "None", inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
 
 
 @app_commands.command(name="addnote", description="[ADMIN] Append an admin note to a user.")
@@ -814,15 +809,19 @@ async def cmd_addnote(i: discord.Interaction, user: discord.Member, note: str):
     did = str(user.id)
     row = DB.execute("SELECT notes FROM users WHERE discord_id=?", (did,)).fetchone()
     if not row:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     stamp = f"[{now_iso()[:10]} - {i.user}] {note}"
     existing = row["notes"] or ""
     DB.execute("UPDATE users SET notes=? WHERE discord_id=?", ((existing + "\n" + stamp).strip(), did))
     DB.commit()
     audit("ADD_NOTE", actor_id=str(i.user.id), target_id=did, detail=note[:100])
-    view = SimpleView(discord.Color.blurple(), "**Note Added**", f"Added note to <@{did}>.", f"```{note[:200]}```")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Note Added", color=discord.Color.blurple())
+    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="Note", value=f"```{note[:200]}```", inline=False)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="resethwid", description="[ADMIN] Force-reset or rebind a user's HWID.")
@@ -832,15 +831,19 @@ async def cmd_resethwid(i: discord.Interaction, user: discord.Member, new_hwid: 
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     hashed = hash_hwid(new_hwid) if new_hwid else None
     DB.execute("UPDATE users SET hwid=?, hwid_resets=hwid_resets+1 WHERE discord_id=?", (hashed, did))
     DB.commit()
     audit("HWID_RESET_ADMIN", actor_id=str(i.user.id), target_id=did, detail="set" if hashed else "cleared")
     action = "updated" if hashed else "cleared"
-    view = SimpleView(discord.Color.orange(), f"**HWID {action.title()}**", f"HWID {action} for <@{did}>.")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title=f"HWID {action.title()}", color=discord.Color.orange())
+    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="Status", value=action.title(), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="banhwid", description="[ADMIN] Globally ban an HWID.")
@@ -854,15 +857,17 @@ async def cmd_banhwid(i: discord.Interaction, raw_hwid: str, reason: Optional[st
                    (hashed, reason or "No reason", now_iso(), str(i.user.id)))
         DB.commit()
     except sqlite3.IntegrityError:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.orange(), "**Already Banned**", "That HWID is already banned.")), ephemeral=True)
+        e = discord.Embed(title="Already Banned", color=discord.Color.orange(),
+            description="That HWID is already banned.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     audit("HWID_BAN", actor_id=str(i.user.id), detail=hashed[:16])
-    view = StatusView(
-        discord.Color.red(), "HWID Banned",
-        [("Hash", f"`{hashed[:24]}...`"), ("Reason", reason or "None"), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_embed(view)
+    e = discord.Embed(title="HWID Banned", color=discord.Color.red())
+    e.add_field(name="Hash", value=f"`{hashed[:24]}...`", inline=False)
+    e.add_field(name="Reason", value=reason or "None", inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
 
 
 @app_commands.command(name="unbanhwid", description="[ADMIN] Remove an HWID ban.")
@@ -874,11 +879,14 @@ async def cmd_unbanhwid(i: discord.Interaction, raw_hwid: str):
     cur = DB.execute("DELETE FROM hwid_bans WHERE hwid=?", (hashed,))
     DB.commit()
     if cur.rowcount == 0:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Found**", "That HWID is not banned.")), ephemeral=True)
+        e = discord.Embed(title="Not Found", color=discord.Color.red(),
+            description="That HWID is not banned.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     audit("HWID_UNBAN", actor_id=str(i.user.id), detail=hashed[:16])
-    view = SimpleView(discord.Color.green(), "**HWID Unbanned**", "Hardware ID removed from ban list.")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="HWID Unbanned", color=discord.Color.green(),
+        description="Hardware ID removed from ban list.")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="extend", description="[ADMIN] Set or extend a user's expiry date.")
@@ -888,20 +896,24 @@ async def cmd_extend(i: discord.Interaction, user: discord.Member, expires: str)
     await i.response.defer(ephemeral=True)
     exp_iso = parse_date(expires)
     if not exp_iso:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Bad Date**", "Use format: `YYYY-MM-DD`")), ephemeral=True)
+        e = discord.Embed(title="Bad Date", color=discord.Color.red(),
+            description="Use format: `YYYY-MM-DD`")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     DB.execute("UPDATE users SET expires_at=?, status='active', ban_reason=NULL WHERE discord_id=?", (exp_iso, did))
     DB.commit()
     audit("EXTEND", actor_id=str(i.user.id), target_id=did, detail=f"new_expiry={expires}")
-    view = StatusView(
-        discord.Color.green(), "Expiry Updated",
-        [("User", f"<@{did}>"), ("New Expiry", expires), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Expiry Updated", color=discord.Color.green())
+    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="New Expiry", value=expires, inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="setproduct", description="[ADMIN] Change a user's product tier.")
@@ -911,16 +923,18 @@ async def cmd_setproduct(i: discord.Interaction, user: discord.Member, product: 
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     DB.execute("UPDATE users SET product=? WHERE discord_id=?", (product, did))
     DB.commit()
     audit("SET_PRODUCT", actor_id=str(i.user.id), target_id=did, detail=f"product={product}")
-    view = StatusView(
-        discord.Color.blurple(), "Product Updated",
-        [("User", f"<@{did}>"), ("New Product", product), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Product Updated", color=discord.Color.blurple())
+    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="New Product", value=product, inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="grantresets", description="[ADMIN] Give a user extra HWID reset uses.")
@@ -931,17 +945,19 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     did = str(user.id)
     row = DB.execute("SELECT hwid_resets FROM users WHERE discord_id=?", (did,)).fetchone()
     if not row:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     new_val = max(0, row["hwid_resets"] + count)
     DB.execute("UPDATE users SET hwid_resets=? WHERE discord_id=?", (new_val, did))
     DB.commit()
     audit("GRANT_RESETS", actor_id=str(i.user.id), target_id=did, detail=f"delta={count} new_val={new_val}")
-    view = StatusView(
-        discord.Color.blurple(), "Resets Updated",
-        [("User", f"<@{did}>"), ("Reset Counter", str(new_val)), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Resets Updated", color=discord.Color.blurple())
+    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="Reset Counter", value=str(new_val), inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="listusers", description="[ADMIN] Browse registered users.")
@@ -961,14 +977,17 @@ async def cmd_listusers(i: discord.Interaction,
     q += " ORDER BY registered_at DESC LIMIT ?"; p.append(limit)
     rows = DB.execute(q, p).fetchall()
     if not rows:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**No Users Found**")), ephemeral=True)
+        e = discord.Embed(title="No Users Found", color=discord.Color.red(),
+            description="No users match that filter.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     lines = []
     for r in rows:
         s = effective_status(r)
         lines.append(f"{status_emoji(s)} {r['discord_id']} - {r['product']} - expires {fmt_dt(r['expires_at'])}")
-    view = KeyListView(f"Users ({len(rows)} shown)", lines)
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title=f"Users ({len(rows)} shown)", color=discord.Color.blurple(),
+        description="```\n" + "\n".join(lines) + "\n```")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="listkeys", description="[ADMIN] Browse unclaimed keys in the pool.")
@@ -985,14 +1004,17 @@ async def cmd_listkeys(i: discord.Interaction,
     q += " ORDER BY created_at DESC LIMIT ?"; p.append(limit)
     rows = DB.execute(q, p).fetchall()
     if not rows:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.orange(), "**No Unclaimed Keys**")), ephemeral=True)
+        e = discord.Embed(title="No Unclaimed Keys", color=discord.Color.orange(),
+            description="No unclaimed keys in the pool.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     lines = []
     for r in rows:
         vis_icon = "🌐" if r["visibility"] == "public" else "🔒"
         lines.append(f"{vis_icon} {r['key']} - {r['product']} - {fmt_dt(r['expires_at'])}")
-    view = KeyListView(f"Unclaimed Keys ({len(rows)})", lines)
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title=f"Unclaimed Keys ({len(rows)})", color=discord.Color.blurple(),
+        description="```\n" + "\n".join(lines) + "\n```")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="deletekey", description="[ADMIN] Delete an unclaimed key from the pool.")
@@ -1003,12 +1025,14 @@ async def cmd_deletekey(i: discord.Interaction, key: str):
     cur = DB.execute("DELETE FROM key_pool WHERE key=? AND claimed=0", (key.strip().upper(),))
     DB.commit()
     if cur.rowcount == 0:
-        view = SimpleView(discord.Color.red(), "**Not Found**", "Key not found or already claimed.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Not Found", color=discord.Color.red(),
+            description="Key not found or already claimed.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     audit("DELETE_KEY", actor_id=str(i.user.id), detail=f"key={key[:20]}")
-    view = SimpleView(discord.Color.green(), "**Key Deleted**", f"`{key}` removed from pool.")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Key Deleted", color=discord.Color.green(),
+        description=f"`{key}` removed from pool.")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="auditlog", description="[ADMIN] View audit log with optional filters.")
@@ -1029,7 +1053,9 @@ async def cmd_auditlog(i: discord.Interaction,
     q += " ORDER BY id DESC LIMIT ?"; p.append(limit)
     rows = DB.execute(q, p).fetchall()
     if not rows:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**No Entries Found**")), ephemeral=True)
+        e = discord.Embed(title="No Entries Found", color=discord.Color.red(),
+            description="No audit entries match that filter.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     lines = []
     for r in rows:
@@ -1037,8 +1063,9 @@ async def cmd_auditlog(i: discord.Interaction,
         actor = r["actor_id"] or "-"
         detail = f" | {r['detail'][:50]}" if r["detail"] else ""
         lines.append(f"[{ts}] {r['action']} | {actor}{detail}")
-    view = KeyListView(f"Audit Log ({len(rows)})", lines)
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title=f"Audit Log ({len(rows)})", color=discord.Color.dark_gray(),
+        description="```\n" + "\n".join(lines) + "\n```")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="stats", description="[ADMIN] Full system stats.")
@@ -1062,16 +1089,18 @@ async def cmd_stats(i: discord.Interaction):
         "SELECT COUNT(*) FROM audit_log WHERE action='REGISTER_SUCCESS' AND timestamp LIKE ?",
         (today + "%",)
     ).fetchone()[0]
-    view = StatusView(
-        discord.Color.blurple(), "KeyLock Stats",
-        [
-            ("Users", f"Total: **{total}** | Active: **{active}** | Banned: **{banned}** | Revoked: **{revoked}**"),
-            ("Keys", f"Unclaimed: **{unclaim}** | Claimed: **{claimed}**"),
-            ("Security", f"HWID Bans: **{hwbans}** | Audit Entries: **{logs}**"),
-            ("Today", f"Logins: **{logins_today}** | Registrations: **{regs_today}**"),
-        ]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="KeyLock Stats", color=discord.Color.blurple())
+    e.add_field(name="Total Users", value=str(total), inline=True)
+    e.add_field(name="Active", value=str(active), inline=True)
+    e.add_field(name="Banned", value=str(banned), inline=True)
+    e.add_field(name="Revoked", value=str(revoked), inline=True)
+    e.add_field(name="Unclaimed Keys", value=str(unclaim), inline=True)
+    e.add_field(name="Claimed Keys", value=str(claimed), inline=True)
+    e.add_field(name="HWID Bans", value=str(hwbans), inline=True)
+    e.add_field(name="Audit Entries", value=str(logs), inline=True)
+    e.add_field(name="Logins Today", value=str(logins_today), inline=True)
+    e.add_field(name="Registrations Today", value=str(regs_today), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="announce",
@@ -1099,8 +1128,9 @@ async def cmd_announce(i: discord.Interaction,
     ann_embed.set_footer(text=i.guild.name)
     await channel.send(embed=ann_embed)
     audit("ANNOUNCE", actor_id=str(i.user.id), detail=f"channel={channel.id} title={title[:50]}")
-    view = SimpleView(discord.Color.green(), "**Announcement Sent**", f"Posted to {channel.mention}.")
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Announcement Sent", color=discord.Color.green(),
+        description=f"Posted to {channel.mention}.")
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="purgeexpired",
@@ -1126,11 +1156,10 @@ async def cmd_purgeexpired(i: discord.Interaction):
                 pass
     DB.commit()
     audit("PURGE_EXPIRED", actor_id=str(i.user.id), detail=f"revoked {count}")
-    view = StatusView(
-        discord.Color.orange(), "Purge Complete",
-        [("Licenses Revoked", str(count)), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Purge Complete", color=discord.Color.orange())
+    e.add_field(name="Licenses Revoked", value=str(count), inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="wipeuser",
@@ -1140,18 +1169,16 @@ async def cmd_purgeexpired(i: discord.Interaction):
 async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: str = ""):
     await i.response.defer(ephemeral=True)
     if confirm != "CONFIRM":
-        view = SimpleView(
-            discord.Color.red(),
-            "**Confirmation Required**",
-            "Pass `confirm: CONFIRM` to wipe a user.",
-            "This cannot be undone."
-        )
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Confirmation Required", color=discord.Color.red(),
+            description="Pass `confirm: CONFIRM` to wipe a user. This cannot be undone.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     did = str(user.id)
     row = DB.execute("SELECT key FROM users WHERE discord_id=?", (did,)).fetchone()
     if not row:
-        await i.followup.send(**cv2_send(SimpleView(discord.Color.red(), "**Not Registered**")), ephemeral=True)
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
     DB.execute("DELETE FROM users WHERE discord_id=?", (did,))
     DB.execute("UPDATE key_pool SET claimed=0 WHERE key=?", (row["key"],))
@@ -1163,12 +1190,12 @@ async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: st
     except Exception:
         pass
     audit("WIPE_USER", actor_id=str(i.user.id), target_id=did)
-    view = StatusView(
-        discord.Color.dark_red(), "User Wiped",
-        [("User", f"{user} ({did})"), ("Key", "Returned to pool"), ("By", str(i.user))]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_embed(view)
+    e = discord.Embed(title="User Wiped", color=discord.Color.dark_red())
+    e.add_field(name="User", value=f"{user} ({did})", inline=True)
+    e.add_field(name="Key", value="Returned to pool", inline=True)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
 
 
 @app_commands.command(name="invite", description="[ADMIN] Get the bot invite URL.")
@@ -1183,11 +1210,10 @@ async def cmd_invite(i: discord.Interaction):
         use_application_commands=True,
     )
     url = discord.utils.oauth_url(BOT.user.id, permissions=perms)
-    view = StatusView(
-        discord.Color.blurple(), "Bot Invite URL",
-        [("Link", url), ("Permissions", "Send Messages, Manage Roles, Read Messages, Slash Commands")]
-    )
-    await i.followup.send(**cv2_send(view), ephemeral=True)
+    e = discord.Embed(title="Bot Invite URL", color=discord.Color.blurple())
+    e.add_field(name="Link", value=url, inline=False)
+    e.add_field(name="Permissions", value="Send Messages, Manage Roles, Read Messages, Slash Commands", inline=False)
+    await i.followup.send(embed=e, ephemeral=True)
 
 
 async def _send_login_log(discord_id: str, ip: str, product: str, expires_at: str):
@@ -1199,19 +1225,15 @@ async def _send_login_log(discord_id: str, ip: str, product: str, expires_at: st
     total = DB.execute(
         "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='ok'", (discord_id,)
     ).fetchone()[0]
-    view = StatusView(
-        discord.Color.green(), "Login Detected",
-        [
-            ("User", f"<@{discord_id}> (`{discord_id}`)"),
-            ("Product", product),
-            ("IP", f"`{ip}`"),
-            ("Expires", fmt_dt(expires_at)),
-            ("Total Logins", str(total)),
-        ],
-        footer=fmt_ts(now_iso())
-    )
+    login_e = discord.Embed(title="Login Detected", color=discord.Color.green())
+    login_e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+    login_e.add_field(name="Product", value=product, inline=True)
+    login_e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    login_e.add_field(name="Expires", value=fmt_dt(expires_at), inline=True)
+    login_e.add_field(name="Total Logins", value=str(total), inline=True)
+    login_e.set_footer(text=fmt_ts(now_iso()))
     try:
-        await ch.send(embed=view)
+        await ch.send(embed=login_e)
     except Exception as e:
         log.warning("Login log send failed: %s", e)
 
@@ -1432,7 +1454,7 @@ def start_api(port: int):
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
 ALL_COMMANDS = [
-    cmd_register, cmd_mystatus, cmd_resetmyhwid,
+    cmd_register, cmd_mystatus,
     cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
     cmd_addnote, cmd_resethwid, cmd_banhwid, cmd_unbanhwid,
     cmd_extend, cmd_setproduct, cmd_grantresets,
