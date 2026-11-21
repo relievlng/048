@@ -673,14 +673,14 @@ async def cmd_lookup(i: discord.Interaction, query: str):
         ).fetchall()
         hwid_alts = [r["discord_id"] for r in hwid_rows]
 
-    # Last 3 login entries
+    # Last 5 login entries
     recent = DB.execute(
-        "SELECT status, ip, timestamp FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 3", (did,)
+        "SELECT status, ip, timestamp FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 5", (did,)
     ).fetchall()
 
-    # Recent audit actions targeting this user
+    # Recent audit actions targeting this user (last 5)
     audit_rows = DB.execute(
-        "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 3", (did,)
+        "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 5", (did,)
     ).fetchall()
 
     # Discord member info
@@ -722,22 +722,24 @@ async def cmd_lookup(i: discord.Interaction, query: str):
     e.add_field(name="Last Seen",  value=fmt_ts(row["last_seen"]),      inline=True)
     e.add_field(name="Last IP",    value=f"`{row['ip_last']}`" if row["ip_last"] else "N/A", inline=True)
 
-    # Row 3 - hardware / resets
-    e.add_field(name="HWID Bound",    value="Yes" if row["hwid"] else "No",          inline=True)
-    e.add_field(name="HWID Resets",   value=str(row["hwid_resets"]),                 inline=True)
-    e.add_field(name="FAC Auth",      value=f"{'✅' if row['fac_reset_auth'] else '❌'} {'Yes' if row['fac_reset_auth'] else 'No'}", inline=True)
+    # Row 3 - hardware / FAC / session stats
+    hwid_val = f"Bound - {row['hwid_resets']} reset(s) used" if row["hwid"] else "Not bound"
+    fac_val  = f"{'✅' if row['fac_reset_auth'] else '❌'} Auth'd  |  Key: `{row['fac_auth_key']}`" if row["fac_auth_key"] else ("✅ Authorized" if row["fac_reset_auth"] else "❌ Not authorized")
+    sess_val = f"{total_ok} ok / {failed} failed / {len(ip_list)} unique IP(s)"
+    e.add_field(name="HWID",         value=hwid_val,  inline=True)
+    e.add_field(name="FAC Reset",    value=fac_val,   inline=True)
+    e.add_field(name="Sessions",     value=sess_val,  inline=True)
 
-    # Row 4 - session stats
-    e.add_field(name="Sessions (ok)", value=str(total_ok),    inline=True)
-    e.add_field(name="Failed Auths",  value=str(failed),      inline=True)
-    e.add_field(name="Unique IPs",    value=str(len(ip_list)), inline=True)
-
-    # Row 5 - Discord info
-    e.add_field(name="Account Created", value=created, inline=True)
-    e.add_field(name="Server Joined",   value=joined,  inline=True)
+    # Row 4 - Discord info
+    e.add_field(name="Account Created", value=created,         inline=True)
+    e.add_field(name="Server Joined",   value=joined,          inline=True)
     e.add_field(name="Roles",           value=roles_str[:100], inline=True)
 
-    # Alts (only if present)
+    # Known IPs (always show, helps spot multi-IP patterns)
+    ip_str = "  ".join(f"`{ip_addr}`" for ip_addr in ip_list[:12]) if ip_list else "None on record"
+    e.add_field(name=f"Known IPs ({len(ip_list)})", value=ip_str, inline=False)
+
+    # Alt accounts (only if present)
     if alts:
         alt_str = " ".join(f"<@{a}>" for a in alts[:8])
         e.add_field(name=f"IP-Shared Accounts ({len(alts)})", value=alt_str, inline=False)
@@ -1646,134 +1648,6 @@ async def _send_macro_event_log(event_type: str, discord_id: str, ip: str, produ
     await _loader_log(e)
 
 
-@app_commands.command(name="profile",
-    description="[ADMIN] Full profile for a user - HWID, IPs, login history, alt detection.")
-@app_commands.describe(query="@mention, Discord ID, or license key")
-@admin_only()
-async def cmd_profile(i: discord.Interaction, query: str):
-    await i.response.defer(ephemeral=True)
-    clean = query.strip().lstrip("<@!").rstrip(">")
-    row = (
-        DB.execute("SELECT * FROM users WHERE discord_id=?", (clean,)).fetchone() or
-        DB.execute("SELECT * FROM users WHERE key=?", (query.strip().upper(),)).fetchone()
-    )
-    if not row:
-        await i.followup.send(embed=err_embed("Not Found", f"No user matched `{query}`.\nUse `/seed` to create a test record, or check the ID/key."), ephemeral=True)
-        return
-
-    did = row["discord_id"]
-    s   = effective_status(row)
-
-    # Login history (last 10)
-    logins = DB.execute(
-        "SELECT * FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 10", (did,)
-    ).fetchall()
-
-    # All unique IPs this user has logged in from
-    all_ips = DB.execute(
-        "SELECT DISTINCT ip FROM login_log WHERE discord_id=? AND ip IS NOT NULL", (did,)
-    ).fetchall()
-    ip_list = [r["ip"] for r in all_ips]
-
-    # Alt detection - find other accounts sharing any of those IPs
-    alts = []
-    if ip_list:
-        placeholders = ",".join("?" * len(ip_list))
-        alt_rows = DB.execute(
-            f"SELECT DISTINCT discord_id FROM login_log WHERE ip IN ({placeholders}) AND discord_id != ?",
-            ip_list + [did]
-        ).fetchall()
-        alts = [r["discord_id"] for r in alt_rows]
-
-    # HWID sharing - find other accounts with same HWID hash
-    hwid_alts = []
-    if row["hwid"]:
-        hwid_rows = DB.execute(
-            "SELECT discord_id FROM users WHERE hwid=? AND discord_id != ?",
-            (row["hwid"], did)
-        ).fetchall()
-        hwid_alts = [r["discord_id"] for r in hwid_rows]
-
-    # Total login count
-    total_logins = DB.execute(
-        "SELECT COUNT(*) FROM login_log WHERE discord_id=?", (did,)
-    ).fetchone()[0]
-    failed_logins = DB.execute(
-        "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status != 'ok'", (did,)
-    ).fetchone()[0]
-
-    # Notes
-    notes_preview = (row["notes"] or "None")[:300]
-
-    # Audit entries for this user
-    audit_rows = DB.execute(
-        "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 5", (did,)
-    ).fetchall()
-    audit_lines = [f"`{r['action']}` - {r['timestamp'][:10]}" for r in audit_rows] or ["None"]
-
-    # Build login history lines
-    login_lines = []
-    for l in logins:
-        status_icon = "OK" if l["status"] == "ok" else l["status"].upper()
-        login_lines.append(f"[{l['timestamp'][:16].replace('T',' ')}] {status_icon} - {l['ip'] or 'N/A'}")
-
-    prod_icon = PRODUCT_ICONS.get(row["product"], "🔑")
-
-    # ── Embed 1 - Identity ─────────────────────────────────────────────────
-    e1 = discord.Embed(
-        title="User Profile",
-        description=f"<@{did}> (`{did}`)",
-        color=status_color(s)
-    )
-    e1.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
-    e1.add_field(name="Product", value=f"{prod_icon} {row['product']}", inline=True)
-    e1.add_field(name="​", value="​", inline=True)
-    e1.add_field(name="Registered", value=fmt_dt(row["registered_at"]), inline=True)
-    e1.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
-    e1.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
-    e1.add_field(name="Last IP", value=f"`{row['ip_last'] or 'N/A'}`", inline=True)
-    e1.add_field(name="HWID Bound", value="Yes" if row["hwid"] else "No", inline=True)
-    e1.add_field(name="HWID Resets Used", value=str(row["hwid_resets"]), inline=True)
-    fac_status = "Authorized" if row["fac_reset_auth"] else "Not Authorized"
-    e1.add_field(name="FAC Reset", value=f"{'✅' if row['fac_reset_auth'] else '❌'} {fac_status}", inline=True)
-    e1.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`" if row["fac_auth_key"] else "N/A", inline=True)
-    e1.add_field(name="​", value="​", inline=True)
-    e1.add_field(name="License Key", value=f"`{row['key']}`", inline=False)
-    if row["ban_reason"]:
-        e1.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
-    e1.set_footer(text=ts())
-
-    # ── Embed 2 - Network / Alts ───────────────────────────────────────────
-    has_alts = bool(alts or hwid_alts)
-    e2 = discord.Embed(
-        title="Network & Alt Detection",
-        description="Potential alts detected - review carefully." if has_alts else "No shared IPs or hardware IDs detected.",
-        color=discord.Color.orange() if has_alts else discord.Color.blurple()
-    )
-    ip_str = " ".join(f"`{ip_addr}`" for ip_addr in ip_list) if ip_list else "None on record"
-    e2.add_field(name=f"Known IPs ({len(ip_list)})", value=ip_str, inline=False)
-    alt_str = " ".join(f"<@{a}>" for a in alts[:10]) if alts else "None"
-    e2.add_field(name=f"IP-Shared Accounts ({len(alts)})", value=alt_str, inline=False)
-    h_str = " ".join(f"<@{a}>" for a in hwid_alts[:10]) if hwid_alts else "None"
-    e2.add_field(name=f"HWID-Shared Accounts ({len(hwid_alts)})", value=h_str, inline=False)
-    e2.set_footer(text=ts())
-
-    # ── Embed 3 - Login history + notes ───────────────────────────────────
-    e3 = discord.Embed(
-        title="Login History",
-        description="```\n" + "\n".join(login_lines or ["No logins recorded"]) + "\n```",
-        color=discord.Color.dark_gray()
-    )
-    e3.add_field(name="Total Logins", value=str(total_logins), inline=True)
-    e3.add_field(name="Failed Attempts", value=str(failed_logins), inline=True)
-    e3.add_field(name="​", value="​", inline=True)
-    e3.add_field(name="Recent Admin Actions", value="\n".join(audit_lines), inline=False)
-    e3.add_field(name="Notes", value=f"```{notes_preview}```", inline=False)
-    e3.set_footer(text=ts())
-
-    await i.followup.send(embeds=[e1, e2, e3], ephemeral=True)
-
-
 # ─── VERIFY API ───────────────────────────────────────────────────────────────
 
 class VerifyHandler(BaseHTTPRequestHandler):
@@ -2179,7 +2053,7 @@ async def cmd_seed(i: discord.Interaction,
 
 ALL_COMMANDS = [
     cmd_register, cmd_mystatus,
-    cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
+    cmd_keygen, cmd_lookup, cmd_ban, cmd_unban, cmd_revoke,
     cmd_addnote, cmd_resethwid, cmd_hwid,
     cmd_extend, cmd_setproduct, cmd_grantresets,
     cmd_fac,
