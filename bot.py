@@ -108,6 +108,15 @@ def init_db(path: str) -> sqlite3.Connection:
             ip          TEXT,
             detail      TEXT
         );
+        CREATE TABLE IF NOT EXISTS login_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id  TEXT NOT NULL,
+            hwid        TEXT,
+            ip          TEXT,
+            timestamp   TEXT NOT NULL,
+            product     TEXT,
+            status      TEXT NOT NULL DEFAULT 'ok'
+        );
     """)
     conn.commit()
     # Live migration - add visibility column to existing deployments
@@ -1164,6 +1173,165 @@ async def cmd_invite(i: discord.Interaction):
     await i.followup.send(**cv2_send(view), ephemeral=True)
 
 
+async def _send_login_log(discord_id: str, ip: str, product: str, expires_at: str):
+    """Called from the API thread via run_coroutine_threadsafe."""
+    ch = BOT.get_channel(CONFIG["log_channel_id"])
+    if not ch:
+        return
+    # Count total logins for this user
+    total = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='ok'", (discord_id,)
+    ).fetchone()[0]
+    view = StatusView(
+        discord.Color.green(), "Login Detected",
+        [
+            ("User", f"<@{discord_id}> (`{discord_id}`)"),
+            ("Product", product),
+            ("IP", f"`{ip}`"),
+            ("Expires", fmt_dt(expires_at)),
+            ("Total Logins", str(total)),
+        ],
+        footer=fmt_ts(now_iso())
+    )
+    try:
+        await ch.send(**cv2_send(view))
+    except Exception as e:
+        log.warning("Login log send failed: %s", e)
+
+
+@app_commands.command(name="profile",
+    description="[ADMIN] Full profile for a user - HWID, IPs, login history, alt detection.")
+@app_commands.describe(query="@mention, Discord ID, or license key")
+@admin_only()
+async def cmd_profile(i: discord.Interaction, query: str):
+    await i.response.defer(ephemeral=True)
+    clean = query.strip().lstrip("<@!").rstrip(">")
+    row = (
+        DB.execute("SELECT * FROM users WHERE discord_id=?", (clean,)).fetchone() or
+        DB.execute("SELECT * FROM users WHERE key=?", (query.strip().upper(),)).fetchone()
+    )
+    if not row:
+        view = SimpleView(discord.Color.red(), "**Not Found**", "No user matched that query.")
+        await i.followup.send(**cv2_send(view), ephemeral=True)
+        return
+
+    did = row["discord_id"]
+    s   = effective_status(row)
+
+    # Login history (last 10)
+    logins = DB.execute(
+        "SELECT * FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 10", (did,)
+    ).fetchall()
+
+    # All unique IPs this user has logged in from
+    all_ips = DB.execute(
+        "SELECT DISTINCT ip FROM login_log WHERE discord_id=? AND ip IS NOT NULL", (did,)
+    ).fetchall()
+    ip_list = [r["ip"] for r in all_ips]
+
+    # Alt detection - find other accounts sharing any of those IPs
+    alts = []
+    if ip_list:
+        placeholders = ",".join("?" * len(ip_list))
+        alt_rows = DB.execute(
+            f"SELECT DISTINCT discord_id FROM login_log WHERE ip IN ({placeholders}) AND discord_id != ?",
+            ip_list + [did]
+        ).fetchall()
+        alts = [r["discord_id"] for r in alt_rows]
+
+    # HWID sharing - find other accounts with same HWID hash
+    hwid_alts = []
+    if row["hwid"]:
+        hwid_rows = DB.execute(
+            "SELECT discord_id FROM users WHERE hwid=? AND discord_id != ?",
+            (row["hwid"], did)
+        ).fetchall()
+        hwid_alts = [r["discord_id"] for r in hwid_rows]
+
+    # Total login count
+    total_logins = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=?", (did,)
+    ).fetchone()[0]
+    failed_logins = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status != 'ok'", (did,)
+    ).fetchone()[0]
+
+    # Notes
+    notes_preview = (row["notes"] or "None")[:300]
+
+    # Audit entries for this user
+    audit_rows = DB.execute(
+        "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 5", (did,)
+    ).fetchall()
+    audit_lines = [f"`{r['action']}` - {r['timestamp'][:10]}" for r in audit_rows] or ["None"]
+
+    # Build login history lines
+    login_lines = []
+    for l in logins:
+        status_icon = "OK" if l["status"] == "ok" else l["status"].upper()
+        login_lines.append(f"[{l['timestamp'][:16].replace('T',' ')}] {status_icon} - {l['ip'] or 'N/A'}")
+
+    # Build the full profile view - split into two containers for length
+    view = discord.ui.LayoutView()
+
+    # Container 1 - Identity
+    c1 = discord.ui.Container(accent_color=status_color(s))
+    c1.add_item(discord.ui.TextDisplay(f"### Profile - <@{did}>"))
+    c1.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    c1.add_item(discord.ui.TextDisplay(
+        f"**Status:** {status_emoji(s)} {s.upper()}\n"
+        f"**Product:** {row['product']}\n"
+        f"**Key:** `{row['key']}`\n"
+        f"**Registered:** {fmt_dt(row['registered_at'])}\n"
+        f"**Expires:** {fmt_dt(row['expires_at'])}\n"
+        f"**Last Seen:** {fmt_ts(row['last_seen'])}\n"
+        f"**Last IP:** `{row['ip_last'] or 'N/A'}`\n"
+        f"**HWID Bound:** {'Yes' if row['hwid'] else 'No'}\n"
+        f"**HWID Resets Used:** {row['hwid_resets']}"
+    ))
+    if row["ban_reason"]:
+        c1.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        c1.add_item(discord.ui.TextDisplay(f"**Ban Reason:** {row['ban_reason']}"))
+    view.add_item(c1)
+
+    # Container 2 - Network / Alts
+    c2 = discord.ui.Container(accent_color=discord.Color.orange() if alts or hwid_alts else discord.Color.blurple())
+    c2.add_item(discord.ui.TextDisplay("### Network & Alts"))
+    c2.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    ip_str = " - ".join(f"`{ip}`" for ip in ip_list) if ip_list else "None"
+    c2.add_item(discord.ui.TextDisplay(f"**Known IPs ({len(ip_list)}):** {ip_str}"))
+    if alts:
+        alt_str = " - ".join(f"<@{a}>" for a in alts[:10])
+        c2.add_item(discord.ui.TextDisplay(f"**IP-Shared Accounts ({len(alts)}):** {alt_str}"))
+    else:
+        c2.add_item(discord.ui.TextDisplay("**IP-Shared Accounts:** None detected"))
+    if hwid_alts:
+        h_str = " - ".join(f"<@{a}>" for a in hwid_alts[:10])
+        c2.add_item(discord.ui.TextDisplay(f"**HWID-Shared Accounts ({len(hwid_alts)}):** {h_str}"))
+    else:
+        c2.add_item(discord.ui.TextDisplay("**HWID-Shared Accounts:** None detected"))
+    view.add_item(c2)
+
+    # Container 3 - Logins
+    c3 = discord.ui.Container(accent_color=discord.Color.dark_gray())
+    c3.add_item(discord.ui.TextDisplay(
+        f"### Login History - {total_logins} total ({failed_logins} failed)"
+    ))
+    c3.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    c3.add_item(discord.ui.TextDisplay("```\n" + "\n".join(login_lines or ["No logins recorded"]) + "\n```"))
+    view.add_item(c3)
+
+    # Container 4 - Admin notes + recent audit
+    c4 = discord.ui.Container(accent_color=discord.Color.dark_gray())
+    c4.add_item(discord.ui.TextDisplay("### Notes & Audit"))
+    c4.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    c4.add_item(discord.ui.TextDisplay(f"**Admin Notes:**\n```{notes_preview}```"))
+    c4.add_item(discord.ui.TextDisplay("**Recent Actions:**\n" + "\n".join(audit_lines)))
+    view.add_item(c4)
+
+    await i.followup.send(view=view, flags=discord.MessageFlags(is_components_v2=True), ephemeral=True)
+
+
 # ─── VERIFY API ───────────────────────────────────────────────────────────────
 
 class VerifyHandler(BaseHTTPRequestHandler):
@@ -1194,32 +1362,55 @@ class VerifyHandler(BaseHTTPRequestHandler):
 
         if DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (hashed,)).fetchone():
             audit("API_VERIFY_HWID_BANNED", target_id=did, ip=ip)
+            DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                       (did, hashed, ip, now_iso(), None, "hwid_banned"))
+            DB.commit()
             self._out(403, {"status": "hwid_banned", "message": "HWID banned"})
             return
 
         row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
         if not row:
             audit("API_VERIFY_NO_USER", target_id=did, ip=ip)
+            DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                       (did, hashed, ip, now_iso(), None, "not_registered"))
+            DB.commit()
             self._out(401, {"status": "not_registered", "message": "Discord account not registered"})
             return
 
         s = effective_status(row)
         if s in ("banned", "revoked", "expired"):
             audit(f"API_VERIFY_{s.upper()}", target_id=did, ip=ip)
+            DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                       (did, hashed, ip, now_iso(), row["product"], s))
+            DB.commit()
             self._out(403, {"status": s, "message": f"Account {s}"})
             return
 
         if row["hwid"] and row["hwid"] != hashed:
             audit("API_VERIFY_HWID_MISMATCH", target_id=did, ip=ip)
+            DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                       (did, hashed, ip, now_iso(), row["product"], "hwid_mismatch"))
+            DB.commit()
             self._out(403, {"status": "hwid_mismatch", "message": "HWID does not match registered machine"})
             return
 
         if not row["hwid"]:
             DB.execute("UPDATE users SET hwid=? WHERE discord_id=?", (hashed, did))
 
-        DB.execute("UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?", (now_iso(), ip, did))
+        ts = now_iso()
+        DB.execute("UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?", (ts, ip, did))
+        DB.execute(
+            "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+            (did, hashed, ip, ts, row["product"], "ok")
+        )
         DB.commit()
         audit("API_VERIFY_OK", target_id=did, ip=ip, detail=f"product={row['product']}")
+
+        # Fire login log to Discord channel (non-blocking)
+        asyncio.run_coroutine_threadsafe(
+            _send_login_log(did, ip, row["product"], row["expires_at"]),
+            BOT.loop
+        )
 
         self._out(200, {
             "status":     "ok",
@@ -1247,7 +1438,7 @@ def start_api(port: int):
 
 ALL_COMMANDS = [
     cmd_register, cmd_mystatus, cmd_resetmyhwid,
-    cmd_keygen, cmd_lookup, cmd_ban, cmd_unban, cmd_revoke,
+    cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
     cmd_addnote, cmd_resethwid, cmd_banhwid, cmd_unbanhwid,
     cmd_extend, cmd_setproduct, cmd_grantresets,
     cmd_listusers, cmd_listkeys, cmd_deletekey,
