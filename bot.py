@@ -207,50 +207,41 @@ def parse_date(s: str) -> Optional[str]:
     except ValueError:
         return None
 
-# ─── COMPONENTS V2 HELPERS ────────────────────────────────────────────────────
+# ─── EMBED HELPERS ────────────────────────────────────────────────────────────
 
-def cv2_send(view: discord.ui.LayoutView) -> dict:
-    """Returns kwargs for followup.send / channel.send with CV2 flag.
-    Flag bit 15 (32768) = IS_COMPONENTS_V2. Using value= for version compatibility."""
-    flags = discord.MessageFlags(value=1 << 15)
-    return {"view": view, "flags": flags}
+def simple_embed(color: discord.Color, *lines: str) -> discord.Embed:
+    """One-liner alert embed."""
+    e = discord.Embed(color=color, description="\n".join(lines))
+    return e
 
-class SimpleView(discord.ui.LayoutView):
-    """Single-container CV2 message."""
-    def __init__(self, color: discord.Color, *lines: str, timeout=None):
-        super().__init__(timeout=timeout)
-        c = discord.ui.Container(accent_color=color)
-        for i, line in enumerate(lines):
-            c.add_item(discord.ui.TextDisplay(line))
-            if i < len(lines) - 1:
-                c.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        self.add_item(c)
+def status_embed(color: discord.Color, title: str,
+                 fields: list[tuple[str, str]], footer: str = None) -> discord.Embed:
+    """Rich field embed."""
+    e = discord.Embed(color=color, title=title)
+    for label, value in fields:
+        e.add_field(name=label, value=value, inline=False)
+    if footer:
+        e.set_footer(text=footer)
+    return e
 
-class StatusView(discord.ui.LayoutView):
-    """Rich status card with labeled fields."""
-    def __init__(self, color: discord.Color, title: str, fields: list[tuple[str, str]],
-                 footer: str = None, timeout=None):
-        super().__init__(timeout=timeout)
-        c = discord.ui.Container(accent_color=color)
-        c.add_item(discord.ui.TextDisplay(f"### {title}"))
-        c.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        for label, value in fields:
-            c.add_item(discord.ui.TextDisplay(f"**{label}**\n{value}"))
-        if footer:
-            c.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-            c.add_item(discord.ui.TextDisplay(f"-# {footer}"))
-        self.add_item(c)
+def list_embed(title: str, lines: list[str], color=discord.Color.blurple()) -> discord.Embed:
+    """Code-block list embed."""
+    chunk = "\n".join(lines)
+    e = discord.Embed(color=color, title=title, description=f"```\n{chunk}\n```")
+    return e
 
-class KeyListView(discord.ui.LayoutView):
-    """Code-block style list."""
-    def __init__(self, title: str, lines: list[str], color=discord.Color.blurple(), timeout=None):
-        super().__init__(timeout=timeout)
-        c = discord.ui.Container(accent_color=color)
-        c.add_item(discord.ui.TextDisplay(f"### {title}"))
-        c.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        chunk = "\n".join(lines)
-        c.add_item(discord.ui.TextDisplay(f"```\n{chunk}\n```"))
-        self.add_item(c)
+# Compat shims so every call site works unchanged
+def cv2_send(embed: discord.Embed) -> dict:
+    return {"embed": embed}
+
+def SimpleView(color, *lines, **kw):
+    return simple_embed(color, *lines)
+
+def StatusView(color, title, fields, footer=None, **kw):
+    return status_embed(color, title, fields, footer)
+
+def KeyListView(title, lines, color=discord.Color.blurple(), **kw):
+    return list_embed(title, lines, color)
 
 # ─── BOT ──────────────────────────────────────────────────────────────────────
 
@@ -296,11 +287,11 @@ class KeyLock(commands.Bot):
         except Exception as e:
             log.error("Command sync failed: %s", e)
 
-    async def log_cv2(self, view: discord.ui.LayoutView):
+    async def log_embed(self, embed: discord.Embed):
         ch = self.get_channel(CONFIG["log_channel_id"])
         if ch:
             try:
-                await ch.send(**cv2_send(view))
+                await ch.send(embed=embed)
             except Exception as e:
                 log.warning("Log send failed: %s", e)
 
@@ -471,7 +462,7 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
             ("Expires", fmt_dt(pool["expires_at"])),
         ]
     )
-    await BOT.log_cv2(log_view)
+    await BOT.log_embed(log_view)
 
 
 @app_commands.command(name="mystatus", description="Check your license status.")
@@ -561,7 +552,7 @@ async def cmd_resetmyhwid(i: discord.Interaction, new_hwid: str):
         discord.Color.orange(), "HWID Reset (User)",
         [("User", f"<@{did}> ({did})"), ("Resets Left", str(remaining))]
     )
-    await BOT.log_cv2(log_view)
+    await BOT.log_embed(log_view)
 
 
 # ─── ADMIN COMMANDS ───────────────────────────────────────────────────────────
@@ -667,40 +658,21 @@ async def cmd_keygen(i: discord.Interaction,
     # ── Polished result card ────────────────────────────────────────────────
     prod_emoji = "🌐" if prod == "public" else "🔒"
 
-    class KeygenResultView(discord.ui.LayoutView):
-        pass
-
-    result_view = KeygenResultView()
-
-    # Header
-    header = discord.ui.Container(accent_color=discord.Color.green())
-    header.add_item(discord.ui.TextDisplay("### Key Generated"))
-    header.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    header.add_item(discord.ui.TextDisplay(
-        f"**Product** {prod_emoji} `{prod}`\n"
-        f"**Duration** `{expires_label}`"
-    ))
-    result_view.add_item(header)
-
-    # Key block
-    kc = discord.ui.Container(accent_color=discord.Color.dark_green())
-    kc.add_item(discord.ui.TextDisplay("**License Key**"))
-    kc.add_item(discord.ui.TextDisplay(f"```\n{k}\n```"))
+    result_embed = discord.Embed(
+        title="Key Generated",
+        color=discord.Color.green(),
+    )
+    result_embed.add_field(name="Product", value=f"{prod_emoji} `{prod}`", inline=True)
+    result_embed.add_field(name="Duration", value=f"`{expires_label}`", inline=True)
+    result_embed.add_field(name="License Key", value=f"```\n{k}\n```", inline=False)
     if dm_status:
-        kc.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        kc.add_item(discord.ui.TextDisplay(f"**Delivery** {dm_status}"))
-    result_view.add_item(kc)
-
-    # Footer
-    foot = discord.ui.Container(accent_color=discord.Color.dark_gray())
-    foot_lines = [f"-# Generated by {i.user} - {now_iso()[:16].replace('T', ' ')} UTC"]
+        result_embed.add_field(name="Delivery", value=dm_status, inline=False)
     if notes:
-        foot_lines.insert(0, f"**Notes:** {notes}")
-    foot.add_item(discord.ui.TextDisplay("\n".join(foot_lines)))
-    result_view.add_item(foot)
+        result_embed.add_field(name="Notes", value=notes, inline=False)
+    result_embed.set_footer(text=f"Generated by {i.user} - {now_iso()[:16].replace('T', ' ')} UTC")
 
-    await i.followup.send(**cv2_send(result_view), ephemeral=True)
-    await BOT.log_cv2(result_view)
+    await i.followup.send(embed=result_embed, ephemeral=True)
+    await BOT.log_embed(result_embed)
 
 
 @app_commands.command(name="lookup",
@@ -773,7 +745,7 @@ async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional
         [("User", f"<@{did}> ({did})"), ("Reason", reason or "None"), ("By", str(i.user))]
     )
     await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_cv2(view)
+    await BOT.log_embed(view)
 
 
 @app_commands.command(name="unban", description="[ADMIN] Unban a user's license.")
@@ -802,7 +774,7 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
         [("User", f"<@{did}> ({did})"), ("By", str(i.user))]
     )
     await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_cv2(view)
+    await BOT.log_embed(view)
 
 
 @app_commands.command(name="revoke", description="[ADMIN] Permanently revoke a license.")
@@ -828,7 +800,7 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
         [("User", f"<@{did}> ({did})"), ("Reason", reason or "None"), ("By", str(i.user))]
     )
     await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_cv2(view)
+    await BOT.log_embed(view)
 
 
 @app_commands.command(name="addnote", description="[ADMIN] Append an admin note to a user.")
@@ -887,7 +859,7 @@ async def cmd_banhwid(i: discord.Interaction, raw_hwid: str, reason: Optional[st
         [("Hash", f"`{hashed[:24]}...`"), ("Reason", reason or "None"), ("By", str(i.user))]
     )
     await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_cv2(view)
+    await BOT.log_embed(view)
 
 
 @app_commands.command(name="unbanhwid", description="[ADMIN] Remove an HWID ban.")
@@ -1119,21 +1091,10 @@ async def cmd_announce(i: discord.Interaction,
     except Exception:
         dc = discord.Color.green()
 
-    body_lines = message.replace("\\n", "\n").split("\n")
-    container = discord.ui.Container(accent_color=dc)
-    container.add_item(discord.ui.TextDisplay(f"### {title}"))
-    container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    for line in body_lines:
-        if line.strip():
-            container.add_item(discord.ui.TextDisplay(line))
-    container.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.large))
-    container.add_item(discord.ui.TextDisplay(f"-# {i.guild.name}"))
-
-    class AnnounceView(discord.ui.LayoutView):
-        pass
-    av = AnnounceView()
-    av.add_item(container)
-    await channel.send(**cv2_send(av))
+    body_text = message.replace("\\n", "\n")
+    ann_embed = discord.Embed(title=title, description=body_text, color=dc)
+    ann_embed.set_footer(text=i.guild.name)
+    await channel.send(embed=ann_embed)
     audit("ANNOUNCE", actor_id=str(i.user.id), detail=f"channel={channel.id} title={title[:50]}")
     view = SimpleView(discord.Color.green(), "**Announcement Sent**", f"Posted to {channel.mention}.")
     await i.followup.send(**cv2_send(view), ephemeral=True)
@@ -1204,7 +1165,7 @@ async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: st
         [("User", f"{user} ({did})"), ("Key", "Returned to pool"), ("By", str(i.user))]
     )
     await i.followup.send(**cv2_send(view), ephemeral=True)
-    await BOT.log_cv2(view)
+    await BOT.log_embed(view)
 
 
 @app_commands.command(name="invite", description="[ADMIN] Get the bot invite URL.")
@@ -1247,7 +1208,7 @@ async def _send_login_log(discord_id: str, ip: str, product: str, expires_at: st
         footer=fmt_ts(now_iso())
     )
     try:
-        await ch.send(**cv2_send(view))
+        await ch.send(embed=view)
     except Exception as e:
         log.warning("Login log send failed: %s", e)
 
@@ -1324,67 +1285,43 @@ async def cmd_profile(i: discord.Interaction, query: str):
         status_icon = "OK" if l["status"] == "ok" else l["status"].upper()
         login_lines.append(f"[{l['timestamp'][:16].replace('T',' ')}] {status_icon} - {l['ip'] or 'N/A'}")
 
-    # Build the full profile view - split into containers for length
-    class ProfileView(discord.ui.LayoutView):
-        pass
-    view = ProfileView()
-
-    # Container 1 - Identity
-    c1 = discord.ui.Container(accent_color=status_color(s))
-    c1.add_item(discord.ui.TextDisplay(f"### Profile - <@{did}>"))
-    c1.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    c1.add_item(discord.ui.TextDisplay(
-        f"**Status:** {status_emoji(s)} {s.upper()}\n"
-        f"**Product:** {row['product']}\n"
-        f"**Key:** `{row['key']}`\n"
-        f"**Registered:** {fmt_dt(row['registered_at'])}\n"
-        f"**Expires:** {fmt_dt(row['expires_at'])}\n"
-        f"**Last Seen:** {fmt_ts(row['last_seen'])}\n"
-        f"**Last IP:** `{row['ip_last'] or 'N/A'}`\n"
-        f"**HWID Bound:** {'Yes' if row['hwid'] else 'No'}\n"
-        f"**HWID Resets Used:** {row['hwid_resets']}"
-    ))
+    # ── Embed 1 - Identity ─────────────────────────────────────────────────
+    e1 = discord.Embed(
+        title=f"Profile - {did}",
+        color=status_color(s)
+    )
+    e1.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
+    e1.add_field(name="Product", value=row["product"], inline=True)
+    e1.add_field(name="Key", value=f"`{row['key']}`", inline=False)
+    e1.add_field(name="Registered", value=fmt_dt(row["registered_at"]), inline=True)
+    e1.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
+    e1.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
+    e1.add_field(name="Last IP", value=f"`{row['ip_last'] or 'N/A'}`", inline=True)
+    e1.add_field(name="HWID Bound", value="Yes" if row["hwid"] else "No", inline=True)
+    e1.add_field(name="HWID Resets", value=str(row["hwid_resets"]), inline=True)
     if row["ban_reason"]:
-        c1.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-        c1.add_item(discord.ui.TextDisplay(f"**Ban Reason:** {row['ban_reason']}"))
-    view.add_item(c1)
+        e1.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
 
-    # Container 2 - Network / Alts
-    c2 = discord.ui.Container(accent_color=discord.Color.orange() if alts or hwid_alts else discord.Color.blurple())
-    c2.add_item(discord.ui.TextDisplay("### Network & Alts"))
-    c2.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+    # ── Embed 2 - Network / Alts ───────────────────────────────────────────
+    alt_color = discord.Color.orange() if alts or hwid_alts else discord.Color.blurple()
+    e2 = discord.Embed(title="Network & Alts", color=alt_color)
     ip_str = " - ".join(f"`{ip}`" for ip in ip_list) if ip_list else "None"
-    c2.add_item(discord.ui.TextDisplay(f"**Known IPs ({len(ip_list)}):** {ip_str}"))
-    if alts:
-        alt_str = " - ".join(f"<@{a}>" for a in alts[:10])
-        c2.add_item(discord.ui.TextDisplay(f"**IP-Shared Accounts ({len(alts)}):** {alt_str}"))
-    else:
-        c2.add_item(discord.ui.TextDisplay("**IP-Shared Accounts:** None detected"))
-    if hwid_alts:
-        h_str = " - ".join(f"<@{a}>" for a in hwid_alts[:10])
-        c2.add_item(discord.ui.TextDisplay(f"**HWID-Shared Accounts ({len(hwid_alts)}):** {h_str}"))
-    else:
-        c2.add_item(discord.ui.TextDisplay("**HWID-Shared Accounts:** None detected"))
-    view.add_item(c2)
+    e2.add_field(name=f"Known IPs ({len(ip_list)})", value=ip_str, inline=False)
+    alt_str = " - ".join(f"<@{a}>" for a in alts[:10]) if alts else "None detected"
+    e2.add_field(name=f"IP-Shared Accounts ({len(alts)})", value=alt_str, inline=False)
+    h_str = " - ".join(f"<@{a}>" for a in hwid_alts[:10]) if hwid_alts else "None detected"
+    e2.add_field(name=f"HWID-Shared Accounts ({len(hwid_alts)})", value=h_str, inline=False)
 
-    # Container 3 - Logins
-    c3 = discord.ui.Container(accent_color=discord.Color.dark_gray())
-    c3.add_item(discord.ui.TextDisplay(
-        f"### Login History - {total_logins} total ({failed_logins} failed)"
-    ))
-    c3.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    c3.add_item(discord.ui.TextDisplay("```\n" + "\n".join(login_lines or ["No logins recorded"]) + "\n```"))
-    view.add_item(c3)
+    # ── Embed 3 - Login history + notes ───────────────────────────────────
+    e3 = discord.Embed(
+        title=f"Login History - {total_logins} total ({failed_logins} failed)",
+        color=discord.Color.dark_gray(),
+        description="```\n" + "\n".join(login_lines or ["No logins recorded"]) + "\n```"
+    )
+    e3.add_field(name="Admin Notes", value=f"```{notes_preview}```", inline=False)
+    e3.add_field(name="Recent Actions", value="\n".join(audit_lines), inline=False)
 
-    # Container 4 - Admin notes + recent audit
-    c4 = discord.ui.Container(accent_color=discord.Color.dark_gray())
-    c4.add_item(discord.ui.TextDisplay("### Notes & Audit"))
-    c4.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    c4.add_item(discord.ui.TextDisplay(f"**Admin Notes:**\n```{notes_preview}```"))
-    c4.add_item(discord.ui.TextDisplay("**Recent Actions:**\n" + "\n".join(audit_lines)))
-    view.add_item(c4)
-
-    await i.followup.send(view=view, flags=discord.MessageFlags(is_components_v2=True), ephemeral=True)
+    await i.followup.send(embeds=[e1, e2, e3], ephemeral=True)
 
 
 # ─── VERIFY API ───────────────────────────────────────────────────────────────
