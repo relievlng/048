@@ -31,7 +31,7 @@ def env_int(key: str, default: int = 0) -> int:
         return default
 
 CONFIG = {
-    "token":                  env("DISCORD_TOKEN"),
+    "token":                  env("DISCORD_TOKEN") or env("TOKEN"),
     "guild_id":               env_int("GUILD_ID"),
     "admin_role_id":          env_int("ADMIN_ROLE_ID"),
     "verified_role_id":       env_int("VERIFIED_ROLE_ID"),
