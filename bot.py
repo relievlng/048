@@ -27,17 +27,24 @@ from urllib.parse import urlparse, parse_qs
 def env(key: str, default=None):
     return os.environ.get(key, default)
 
+def env_int(key: str, default: int = 0) -> int:
+    val = os.environ.get(key, "").strip()
+    try:
+        return int(val) if val else default
+    except ValueError:
+        return default
+
 CONFIG = {
     "token":              env("DISCORD_TOKEN",        "YOUR_BOT_TOKEN"),
-    "guild_id":           int(env("GUILD_ID",         "0")),
-    "admin_role_id":      int(env("ADMIN_ROLE_ID",    "0")),
-    "log_channel_id":     int(env("LOG_CHANNEL_ID",   "0")),
-    "verified_role_id":   int(env("VERIFIED_ROLE_ID", "0")),
-    "banned_role_id":     int(env("BANNED_ROLE_ID",   "0")),
+    "guild_id":           env_int("GUILD_ID"),
+    "admin_role_id":      env_int("ADMIN_ROLE_ID"),
+    "log_channel_id":     env_int("LOG_CHANNEL_ID"),
+    "verified_role_id":   env_int("VERIFIED_ROLE_ID"),
+    "banned_role_id":     env_int("BANNED_ROLE_ID"),
     "db_path":            env("DB_PATH",              "/data/keylock.db"),
-    "max_hwid_resets":    int(env("MAX_HWID_RESETS",  "1")),
+    "max_hwid_resets":    env_int("MAX_HWID_RESETS",  1),
     "key_prefix":         env("KEY_PREFIX",           "KL"),
-    "api_port":           int(env("PORT",             "8080")),
+    "api_port":           env_int("PORT",             8080),
 }
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
