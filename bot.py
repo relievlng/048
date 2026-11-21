@@ -978,7 +978,11 @@ async def cmd_resethwid(i: discord.Interaction, user: discord.Member, new_hwid: 
 
 
 @app_commands.command(name="hwid", description="[ADMIN] Ban or unban a hardware ID globally.")
-@app_commands.describe(action="ban or unban", raw_hwid="Raw HWID string from the loader", reason="Reason (required for ban)")
+@app_commands.describe(action="Action to perform", raw_hwid="Raw HWID string from the loader", reason="Reason (required for ban)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="ban   - block this HWID globally", value="ban"),
+    app_commands.Choice(name="unban - remove the HWID ban",      value="unban"),
+])
 @admin_only()
 async def cmd_hwid(i: discord.Interaction, action: str, raw_hwid: str, reason: Optional[str] = None):
     await i.response.defer(ephemeral=True)
@@ -1108,11 +1112,16 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
 
 @app_commands.command(name="fac", description="[ADMIN] Manage FAC reset authorization for a user.")
 @app_commands.describe(
-    action="authorize, revoke, or check",
+    action="Action to perform",
     user="Target user",
     reason="Reason (required for authorize; optional for revoke)",
     ticket="Ticket ID or reference (optional, for authorize)"
 )
+@app_commands.choices(action=[
+    app_commands.Choice(name="authorize - approve one HWID reset", value="authorize"),
+    app_commands.Choice(name="revoke   - remove their auth",        value="revoke"),
+    app_commands.Choice(name="check    - view current status",      value="check"),
+])
 @admin_only()
 async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                   reason: Optional[str] = None, ticket: Optional[str] = None):
