@@ -31,18 +31,20 @@ def env_int(key: str, default: int = 0) -> int:
         return default
 
 CONFIG = {
-    "token":               env("DISCORD_TOKEN"),
-    "guild_id":            env_int("GUILD_ID"),
-    "admin_role_id":       env_int("ADMIN_ROLE_ID"),
-    "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
-    "ticket_category_id":  env_int("TICKET_CATEGORY_ID"),
-    "rules_channel_id":    env_int("RULES_CHANNEL_ID"),
-    "verify_channel_id":   env_int("VERIFY_CHANNEL_ID"),
-    "ticket_channel_id":   env_int("TICKET_CHANNEL_ID"),
-    "log_webhook_url":     env("LOG_WEBHOOK_URL"),
-    "db_path":             env("DB_PATH", "/data/keylock.db"),
-    "key_prefix":          env("KEY_PREFIX", "KL"),
-    "api_port":            env_int("PORT", 8080),
+    "token":                  env("DISCORD_TOKEN"),
+    "guild_id":               env_int("GUILD_ID"),
+    "admin_role_id":          env_int("ADMIN_ROLE_ID"),
+    "verified_role_id":       env_int("VERIFIED_ROLE_ID"),
+    "setup_pings_role_id":    env_int("SETUP_PINGS_ROLE_ID"),
+    "setup_alerts_channel_id": env_int("SETUP_ALERTS_CHANNEL_ID"),
+    "ticket_category_id":     env_int("TICKET_CATEGORY_ID"),
+    "rules_channel_id":       env_int("RULES_CHANNEL_ID"),
+    "verify_channel_id":      env_int("VERIFY_CHANNEL_ID"),
+    "ticket_channel_id":      env_int("TICKET_CHANNEL_ID"),
+    "log_webhook_url":        env("LOG_WEBHOOK_URL"),
+    "db_path":                env("DB_PATH", "/data/keylock.db"),
+    "key_prefix":             env("KEY_PREFIX", "KL"),
+    "api_port":               env_int("PORT", 8080),
 }
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
@@ -352,6 +354,44 @@ class VerifyView(discord.ui.View):
             return
         await interaction.response.send_modal(VerifyModal())
 
+# ─── SETUP PINGS VIEW ─────────────────────────────────────────────────────────
+
+class SetupPingsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Setup Pings",
+        emoji="🔔",
+        style=discord.ButtonStyle.secondary,
+        custom_id="setup_pings_toggle",
+    )
+    async def toggle_setup_pings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role_id = CONFIG["setup_pings_role_id"]
+        if not role_id:
+            await interaction.response.send_message(
+                "Setup pings role is not configured. Contact staff.", ephemeral=True
+            )
+            return
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message(
+                "Setup pings role not found. Contact staff.", ephemeral=True
+            )
+            return
+        member = interaction.user
+        if role in member.roles:
+            await member.remove_roles(role, reason="Setup pings toggle")
+            await interaction.response.send_message(
+                f"Removed **{role.name}** - you will no longer receive setup pings.", ephemeral=True
+            )
+        else:
+            await member.add_roles(role, reason="Setup pings toggle")
+            await interaction.response.send_message(
+                f"Added **{role.name}** - you will be pinged when setup team is available.", ephemeral=True
+            )
+
+
 # ─── BOT ──────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
@@ -366,6 +406,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
+    bot.add_view(SetupPingsView())
     try:
         synced = await bot.tree.sync()
         log.info(f"Synced {len(synced)} slash commands")
@@ -435,6 +476,57 @@ async def setup_rules(interaction: discord.Interaction):
     embed.set_footer(text="Last updated by staff")
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message("Rules posted.", ephemeral=True)
+
+
+@bot.tree.command(name="setup-info", description="[Admin] Post the setup instructions embed in the current channel.")
+@app_commands.checks.has_role(CONFIG["admin_role_id"])
+async def setup_info_cmd(interaction: discord.Interaction):
+    guild = interaction.guild
+
+    # Resolve ticket channel mention
+    ticket_ch = guild.get_channel(CONFIG["ticket_channel_id"])
+    ticket_ref = ticket_ch.mention if ticket_ch else "#open-a-ticket"
+
+    # Resolve setup alerts channel mention
+    alerts_ch_id = CONFIG["setup_alerts_channel_id"]
+    alerts_ch = guild.get_channel(alerts_ch_id) if alerts_ch_id else None
+    alerts_ref = alerts_ch.mention if alerts_ch else "#setup-alerts"
+
+    embed = discord.Embed(
+        title="Awaiting Setup?",
+        description="Complete every step below, then wait for the Setup Team.",
+        color=0x2b2d31,
+    )
+    embed.add_field(
+        name="🔔 GET SETUP PINGS ROLE",
+        value="Click the button below to get the Setup Pings role (click again to remove it).",
+        inline=False,
+    )
+    embed.add_field(
+        name="📋 OPEN A SETUP TICKET",
+        value=(
+            f"Open a setup ticket here: {ticket_ref}\n"
+            "Your Invoice ID is in your DMs with this bot."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⏰ WAIT FOR SETUP TEAM",
+        value=(
+            f"Check {alerts_ref} regularly.\n"
+            "When a setup team member is available, ping them in your ticket **once** "
+            "with your **AnyDesk code & invoice ID**."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⚠️ IMPORTANT",
+        value="Do **NOT** ping staff unless they have announced they are available for setups.",
+        inline=False,
+    )
+
+    await interaction.channel.send(embed=embed, view=SetupPingsView())
+    await interaction.response.send_message("Setup info posted.", ephemeral=True)
 
 
 @bot.tree.command(name="key", description="Check your license key status.")
