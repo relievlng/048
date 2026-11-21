@@ -45,11 +45,11 @@ def env_int(key: str, default: int = 0) -> int:
         return default
 
 CONFIG = {
-    "token":               env("STAFF_BOT_TOKEN"),
-    "guild_id":            env_int("STAFF_GUILD_ID"),
-    "admin_role_id":       env_int("STAFF_ADMIN_ROLE_ID"),
+    "token":               env("DISCORD_TOKEN"),
+    "guild_id":            env_int("GUILD_ID"),
+    "admin_role_id":       env_int("ADMIN_ROLE_ID"),
     "ticket_category_id":  env_int("TICKET_CATEGORY_ID"),
-    "log_channel_id":      env_int("STAFF_LOG_CHANNEL_ID"),
+    "log_channel_id":      env_int("LOG_CHANNEL_ID"),
     "log_webhook_url":     env("LOG_WEBHOOK_URL"),
     "db_path":             env("DB_PATH", "/data/keylock.db"),
     "main_guild_id":       env_int("MAIN_GUILD_ID"),
