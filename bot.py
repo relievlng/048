@@ -636,33 +636,138 @@ async def cmd_lookup(i: discord.Interaction, query: str):
         await i.followup.send(embed=err_embed("Not Found", f"No user matched `{query}`."), ephemeral=True)
         return
 
+    did = row["discord_id"]
     s = effective_status(row)
-    try:
-        member = await i.guild.fetch_member(int(row["discord_id"]))
-        user_str = f"<@{row['discord_id']}> (`{member}` - `{row['discord_id']}`)"
-    except Exception:
-        user_str = f"<@{row['discord_id']}> (`{row['discord_id']}`)"
 
-    prod_icon = "🌐" if row["product"] == "public" else "🔒"
-    e = discord.Embed(
-        title="User Lookup",
-        description=user_str,
-        color=status_color(s)
-    )
-    e.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
-    e.add_field(name="Product", value=f"{prod_icon} {row['product']}", inline=True)
-    e.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
+    # Pull extra stats from DB
+    total_ok = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='ok'", (did,)
+    ).fetchone()[0]
+    total_all = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=?", (did,)
+    ).fetchone()[0]
+    failed = total_all - total_ok
+
+    # Unique IPs
+    all_ips = DB.execute(
+        "SELECT DISTINCT ip FROM login_log WHERE discord_id=? AND ip IS NOT NULL", (did,)
+    ).fetchall()
+    ip_list = [r["ip"] for r in all_ips]
+
+    # Alt detection (IP-shared)
+    alts: list[str] = []
+    if ip_list:
+        placeholders = ",".join("?" * len(ip_list))
+        alt_rows = DB.execute(
+            f"SELECT DISTINCT discord_id FROM login_log WHERE ip IN ({placeholders}) AND discord_id != ?",
+            ip_list + [did]
+        ).fetchall()
+        alts = [r["discord_id"] for r in alt_rows]
+
+    # HWID-shared alts
+    hwid_alts: list[str] = []
+    if row["hwid"]:
+        hwid_rows = DB.execute(
+            "SELECT discord_id FROM users WHERE hwid=? AND discord_id != ?",
+            (row["hwid"], did)
+        ).fetchall()
+        hwid_alts = [r["discord_id"] for r in hwid_rows]
+
+    # Last 3 login entries
+    recent = DB.execute(
+        "SELECT status, ip, timestamp FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 3", (did,)
+    ).fetchall()
+
+    # Recent audit actions targeting this user
+    audit_rows = DB.execute(
+        "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 3", (did,)
+    ).fetchall()
+
+    # Discord member info
+    try:
+        member = await i.guild.fetch_member(int(did))
+        disc_str = f"<@{did}> (`{member}` / `{did}`)"
+        joined = member.joined_at.strftime("%Y-%m-%d") if member.joined_at else "Unknown"
+        created = member.created_at.strftime("%Y-%m-%d")
+        roles_str = ", ".join(r.name for r in member.roles if r.name != "@everyone") or "None"
+        avatar_url = member.display_avatar.url
+    except Exception:
+        disc_str = f"<@{did}> (`{did}`)"
+        joined = "Not in server"
+        created = "Unknown"
+        roles_str = "N/A"
+        avatar_url = None
+
+    prod_icon = PRODUCT_ICONS.get(row["product"], "🔑")
+    has_alts = bool(alts or hwid_alts)
+
+    # Description: status flag if anything's wrong
+    flags = []
+    if has_alts:        flags.append(f"⚠️ {len(alts)} IP-shared / {len(hwid_alts)} HWID-shared account(s) detected")
+    if failed > 5:      flags.append(f"⚠️ {failed} failed login attempt(s)")
+    if len(ip_list) > 3: flags.append(f"⚠️ {len(ip_list)} unique IPs on record")
+    desc = disc_str + ("\n\n" + "\n".join(flags) if flags else "")
+
+    e = discord.Embed(title="User Lookup", description=desc, color=status_color(s))
+    if avatar_url:
+        e.set_thumbnail(url=avatar_url)
+
+    # Row 1 - license core
+    e.add_field(name="Status",   value=f"{status_emoji(s)} {s.upper()}", inline=True)
+    e.add_field(name="Product",  value=f"{prod_icon} {row['product']}",  inline=True)
+    e.add_field(name="Expires",  value=fmt_dt(row["expires_at"]),         inline=True)
+
+    # Row 2 - dates
     e.add_field(name="Registered", value=fmt_dt(row["registered_at"]), inline=True)
-    e.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
-    e.add_field(name="Last IP", value=f"`{row['ip_last']}`" if row["ip_last"] else "N/A", inline=True)
-    e.add_field(name="HWID Bound", value="Yes" if row["hwid"] else "No", inline=True)
-    e.add_field(name="HWID Resets", value=str(row["hwid_resets"]), inline=True)
-    e.add_field(name="FAC Auth", value="Authorized" if row["fac_reset_auth"] else "Not authorized", inline=True)
-    e.add_field(name="Key", value=f"`{row['key']}`", inline=False)
+    e.add_field(name="Last Seen",  value=fmt_ts(row["last_seen"]),      inline=True)
+    e.add_field(name="Last IP",    value=f"`{row['ip_last']}`" if row["ip_last"] else "N/A", inline=True)
+
+    # Row 3 - hardware / resets
+    e.add_field(name="HWID Bound",    value="Yes" if row["hwid"] else "No",          inline=True)
+    e.add_field(name="HWID Resets",   value=str(row["hwid_resets"]),                 inline=True)
+    e.add_field(name="FAC Auth",      value=f"{'✅' if row['fac_reset_auth'] else '❌'} {'Yes' if row['fac_reset_auth'] else 'No'}", inline=True)
+
+    # Row 4 - session stats
+    e.add_field(name="Sessions (ok)", value=str(total_ok),    inline=True)
+    e.add_field(name="Failed Auths",  value=str(failed),      inline=True)
+    e.add_field(name="Unique IPs",    value=str(len(ip_list)), inline=True)
+
+    # Row 5 - Discord info
+    e.add_field(name="Account Created", value=created, inline=True)
+    e.add_field(name="Server Joined",   value=joined,  inline=True)
+    e.add_field(name="Roles",           value=roles_str[:100], inline=True)
+
+    # Alts (only if present)
+    if alts:
+        alt_str = " ".join(f"<@{a}>" for a in alts[:8])
+        e.add_field(name=f"IP-Shared Accounts ({len(alts)})", value=alt_str, inline=False)
+    if hwid_alts:
+        h_str = " ".join(f"<@{a}>" for a in hwid_alts[:8])
+        e.add_field(name=f"HWID-Shared Accounts ({len(hwid_alts)})", value=h_str, inline=False)
+
+    # Key always full-width
+    e.add_field(name="License Key", value=f"`{row['key']}`", inline=False)
+
+    # Recent logins inline summary
+    if recent:
+        lines = []
+        for r in recent:
+            stamp = r["timestamp"][:16].replace("T", " ")
+            lines.append(f"`{r['status']:15s}` {r['ip'] or 'N/A':>15s}  {stamp}")
+        e.add_field(name="Recent Logins", value="```\n" + "\n".join(lines) + "\n```", inline=False)
+
+    # Recent admin actions
+    if audit_rows:
+        a_lines = [f"`{r['action']}` - {r['timestamp'][:10]}" for r in audit_rows]
+        e.add_field(name="Recent Actions", value="\n".join(a_lines), inline=False)
+
+    # Ban reason + notes
     if row["ban_reason"]:
         e.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
     if row["notes"]:
-        e.add_field(name="Notes", value=row["notes"][-300:], inline=False)
+        e.add_field(name="Notes", value=f"```{row['notes'][-300:]}```", inline=False)
+
+    e.set_footer(text=ts())
     await i.followup.send(embed=e, ephemeral=True)
 
 
