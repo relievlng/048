@@ -470,12 +470,29 @@ async def _setup_customer_channels(guild: discord.Guild):
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
 
-    # Channels to create: (name, everyone_read, config_key)
+    # Find or create the category
+    CATEGORY_NAME = "CUSTOMER BOT"
+    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+    if not category:
+        cat_overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+        }
+        if admin_role:
+            cat_overwrites[admin_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                manage_channels=True, manage_messages=True,
+            )
+        category = await guild.create_category(CATEGORY_NAME, overwrites=cat_overwrites)
+        log.info(f"  Created category: {CATEGORY_NAME} ({category.id})")
+    else:
+        log.info(f"  Category '{CATEGORY_NAME}' already exists ({category.id})")
+
+    # Channels to create inside the category
     CHANNELS = [
+        ("rules",      True),
         ("verify",     True),
         ("hwid-reset", True),
         ("tickets",    True),
-        ("rules",      True),
     ]
 
     created = {}
@@ -499,7 +516,7 @@ async def _setup_customer_channels(guild: discord.Guild):
                 manage_channels=True, manage_messages=True,
             )
 
-        ch = await guild.create_text_channel(name=ch_name, overwrites=overwrites)
+        ch = await guild.create_text_channel(name=ch_name, category=category, overwrites=overwrites)
         created[ch_name] = ch
         log.info(f"  Created #{ch_name} ({ch.id})")
 
