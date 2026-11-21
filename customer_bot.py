@@ -41,6 +41,13 @@ CONFIG = {
     "rules_channel_id":       env_int("RULES_CHANNEL_ID"),
     "verify_channel_id":      env_int("VERIFY_CHANNEL_ID"),
     "ticket_channel_id":      env_int("TICKET_CHANNEL_ID"),
+    # Per-channel webhook URLs (from staff bot's auto-setup output)
+    "wh_tickets_opened":      env("WEBHOOK_CUSTOMER_TICKETS_OPENED"),
+    "wh_tickets_closed":      env("WEBHOOK_CUSTOMER_TICKETS_CLOSED"),
+    "wh_ticket_transcripts":  env("WEBHOOK_CUSTOMER_TICKET_TRANSCRIPTS"),
+    "wh_key_generated":       env("WEBHOOK_CUSTOMER_KEY_GENERATED"),
+    "wh_bans":                env("WEBHOOK_CUSTOMER_BANS"),
+    # Fallback: single webhook for any event type not explicitly wired
     "log_webhook_url":        env("LOG_WEBHOOK_URL"),
     "db_path":                env("DB_PATH", "/data/keylock.db"),
     "key_prefix":             env("KEY_PREFIX", "KL"),
@@ -118,8 +125,10 @@ def reset_hwid(discord_id: str) -> tuple[bool, str]:
 
 # ─── WEBHOOK LOGGING ──────────────────────────────────────────────────────────
 
-async def send_log(title: str, description: str, color: int = 0x5865F2, fields: list = None):
-    url = CONFIG.get("log_webhook_url")
+async def send_log(title: str, description: str, color: int = 0x5865F2, fields: list = None, webhook_key: str = "log_webhook_url"):
+    """Send an embed to the appropriate staff log channel.
+    webhook_key: CONFIG key for the specific channel webhook (falls back to log_webhook_url)."""
+    url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
     if not url:
         return
     embed = {
@@ -256,6 +265,7 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         title="Ticket Opened",
         description=f"**User:** {member.mention} (`{member.id}`)\n**Category:** {cat_info['label']}\n**Channel:** {channel.mention}",
         color=0x57F287,
+        webhook_key="wh_tickets_opened",
     )
 
 async def close_ticket(interaction: discord.Interaction):
@@ -282,9 +292,18 @@ async def close_ticket(interaction: discord.Interaction):
 
     await send_log(
         title="Ticket Closed",
-        description=f"**Channel:** {channel.name}\n**Closed by:** {interaction.user.mention}\n\n**Transcript:**\n```{transcript[:1800]}```",
+        description=f"**Channel:** {channel.name}\n**Closed by:** {interaction.user.mention}\n**Messages:** {msg_count}",
         color=0xED4245,
+        webhook_key="wh_tickets_closed",
     )
+    # Post transcript to its own channel if configured
+    if transcript:
+        await send_log(
+            title=f"Transcript - {channel.name}",
+            description=f"```{transcript[:1900]}```",
+            color=0x5865F2,
+            webhook_key="wh_ticket_transcripts",
+        )
 
     await asyncio.sleep(5)
     await channel.delete(reason=f"Ticket closed by {interaction.user}")
@@ -342,6 +361,7 @@ class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
             title="User Verified",
             description=f"**User:** {member.mention} (`{member.id}`)\n**Key:** `{key}`\n**Product:** {product}",
             color=0x57F287,
+            webhook_key="wh_key_generated",
         )
 
 
@@ -573,6 +593,7 @@ async def hwid_reset_cmd(interaction: discord.Interaction):
             title="HWID Reset",
             description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)",
             color=0xFEE75C,
+            webhook_key="wh_key_generated",
         )
     else:
         embed = discord.Embed(
