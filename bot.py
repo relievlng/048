@@ -255,18 +255,30 @@ class KeyListView(discord.ui.LayoutView):
 class KeyLock(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        # members intent required for fetch_member / role management.
-        # Must be enabled in Discord Dev Portal -> Bot -> Privileged Gateway Intents.
+        # Server Members Intent - enable in Discord Dev Portal -> Bot -> Privileged Gateway Intents.
+        # Bot still runs without it; member lookups in some commands will fall back to ID-only display.
         intents.members = True
         intents.message_content = False
         super().__init__(command_prefix="kl!", intents=intents)
 
+    async def start(self, token: str, **kwargs):
+        try:
+            await super().start(token, **kwargs)
+        except discord.errors.PrivilegedIntentsRequired:
+            log.warning("Server Members Intent not enabled - retrying without it")
+            self.intents.members = False
+            await super().start(token, **kwargs)
+
     async def setup_hook(self):
         g = discord.Object(id=CONFIG["guild_id"])
         self.tree.copy_global_to(guild=g)
-        await self.tree.sync(guild=g)
+        # Sync command tree so slash commands are registered
+        try:
+            synced = await self.tree.sync(guild=g)
+            log.info("Commands synced to guild %d (%d commands)", CONFIG["guild_id"], len(synced))
+        except Exception as e:
+            log.error("Command sync failed: %s", e)
         expire_checker.start()
-        log.info("Commands synced to guild %d", CONFIG["guild_id"])
 
     async def on_ready(self):
         log.info("KeyLock online: %s (%d)", self.user, self.user.id)
@@ -561,10 +573,11 @@ async def autocomplete_duration(i: discord.Interaction, current: str):
         for o in options if current.lower() in o
     ]
 
-async def autocomplete_visibility(i: discord.Interaction, current: str):
+async def autocomplete_product(i: discord.Interaction, current: str):
+    options = ["private", "public"]
     return [
-        app_commands.Choice(name="🔒 private - admin-issued keys only", value="private"),
-        app_commands.Choice(name="🌐 public - anyone can register", value="public"),
+        app_commands.Choice(name=o, value=o)
+        for o in options if current.lower() in o
     ]
 
 DURATION_PRESETS = {
@@ -579,31 +592,27 @@ DURATION_PRESETS = {
     "lifetime": None,
 }
 
-@app_commands.command(name="keygen", description="[ADMIN] Generate keys and optionally DM one to a user.")
+@app_commands.command(name="keygen", description="[ADMIN] Generate a key and optionally DM it to a user.")
 @app_commands.describe(
-    count="Number of keys to generate (1-100)",
-    product="Product name/tier",
-    visibility="private (admin-issued) or public (open registration)",
+    product="private or public (both work in the loader)",
     duration="How long the key is valid for",
-    deliver_to="DM a key directly to this user (only works when count=1)",
-    notes="Admin notes attached to these keys"
+    deliver_to="DM the key directly to this user",
+    notes="Admin notes attached to this key"
 )
-@app_commands.autocomplete(duration=autocomplete_duration, visibility=autocomplete_visibility)
+@app_commands.autocomplete(duration=autocomplete_duration, product=autocomplete_product)
 @admin_only()
 async def cmd_keygen(i: discord.Interaction,
-                     count: app_commands.Range[int, 1, 100] = 1,
-                     product: str = "default",
-                     visibility: Optional[str] = "private",
+                     product: str = "private",
                      duration: Optional[str] = "lifetime",
                      deliver_to: Optional[discord.Member] = None,
                      notes: Optional[str] = None):
-    await i.response.defer(ephemeral=True)
-
-    vis = (visibility or "private").lower()
-    if vis not in ("private", "public"):
-        view = SimpleView(discord.Color.red(), "**Bad Visibility**", "Use `private` or `public`.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+    try:
+        await i.response.defer(ephemeral=True)
+    except Exception as e:
+        log.error("keygen defer failed: %s", e)
         return
+
+    prod = (product or "private").lower().strip()
 
     dur_key = (duration or "lifetime").lower().replace(" ", "")
     if dur_key not in DURATION_PRESETS:
@@ -620,32 +629,26 @@ async def cmd_keygen(i: discord.Interaction,
         exp_iso = exp_dt.isoformat()
         expires_label = exp_dt.strftime("%Y-%m-%d")
 
-    if deliver_to and count > 1:
-        view = SimpleView(discord.Color.red(), "**Invalid**", "`deliver_to` only works when `count` is 1.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
-        return
+    # visibility mirrors product name for private/public, else default private
+    vis = "public" if prod == "public" else "private"
 
-    keys = []
-    for _ in range(count):
-        k = gen_key(CONFIG["key_prefix"])
-        DB.execute(
-            "INSERT OR IGNORE INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?,?)",
-            (k, product, vis, now_iso(), exp_iso, str(i.user.id), notes)
-        )
-        keys.append(k)
+    k = gen_key(CONFIG["key_prefix"])
+    DB.execute(
+        "INSERT OR IGNORE INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?,?)",
+        (k, prod, vis, now_iso(), exp_iso, str(i.user.id), notes)
+    )
     DB.commit()
-    audit("KEYGEN", actor_id=str(i.user.id), detail=f"{count}x product={product} vis={vis} duration={dur_key}")
+    audit("KEYGEN", actor_id=str(i.user.id), detail=f"product={prod} duration={dur_key}")
 
     # DM delivery
     dm_status = None
-    if deliver_to and keys:
-        key_to_send = keys[0]
+    if deliver_to:
         dm_view = StatusView(
             discord.Color.green(),
             "Your License Key",
             [
-                ("Key", f"```{key_to_send}```"),
-                ("Product", product),
+                ("Key", f"```{k}```"),
+                ("Product", prod),
                 ("Duration", expires_label),
                 ("How to activate", "Use `/register <key> <hwid>` in the server to activate your license."),
             ],
@@ -655,61 +658,46 @@ async def cmd_keygen(i: discord.Interaction,
             await deliver_to.send(**cv2_send(dm_view))
             dm_status = f"DM sent to {deliver_to.mention}"
             audit("KEY_DELIVERED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-                  detail=f"key={key_to_send[:20]} product={product}")
+                  detail=f"key={k[:20]} product={prod}")
         except discord.Forbidden:
             dm_status = f"DM FAILED - {deliver_to.mention} has DMs closed"
         except Exception as e:
             dm_status = f"DM FAILED - {e}"
 
-    # ── Build the polished keygen result card ──────────────────────────────
-    vis_emoji = "🔒" if vis == "private" else "🌐"
-    vis_label = "Private (admin-issued)" if vis == "private" else "Public (open registration)"
+    # ── Polished result card ────────────────────────────────────────────────
+    prod_emoji = "🌐" if prod == "public" else "🔒"
 
     class KeygenResultView(discord.ui.LayoutView):
         pass
 
     result_view = KeygenResultView()
 
-    # Header container
+    # Header
     header = discord.ui.Container(accent_color=discord.Color.green())
-    header.add_item(discord.ui.TextDisplay(
-        f"### KeyLock - Keys Generated\n"
-        f"-# {count} key{'s' if count > 1 else ''} created"
-    ))
+    header.add_item(discord.ui.TextDisplay("### Key Generated"))
     header.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
     header.add_item(discord.ui.TextDisplay(
-        f"**Product** `{product}`\n"
-        f"**Visibility** {vis_emoji} {vis_label}\n"
+        f"**Product** {prod_emoji} `{prod}`\n"
         f"**Duration** `{expires_label}`"
     ))
     result_view.add_item(header)
 
-    # Key blocks - each key gets its own container (up to 10 shown individually)
-    if count <= 10:
-        for idx, k in enumerate(keys, 1):
-            kc = discord.ui.Container(accent_color=discord.Color.dark_green())
-            label = f"Key {idx}/{count}" if count > 1 else "License Key"
-            kc.add_item(discord.ui.TextDisplay(f"**{label}**"))
-            kc.add_item(discord.ui.TextDisplay(f"```\n{k}\n```"))
-            if idx == 1 and deliver_to and dm_status:
-                kc.add_item(discord.ui.TextDisplay(
-                    f"**Delivery** {dm_status}"
-                ))
-            result_view.add_item(kc)
-    else:
-        # Too many to show individually - use a compact block
-        block = discord.ui.Container(accent_color=discord.Color.dark_green())
-        block.add_item(discord.ui.TextDisplay(f"**{count} Keys Generated**"))
-        block.add_item(discord.ui.TextDisplay(f"```\n{chr(10).join(keys)}\n```"))
-        result_view.add_item(block)
+    # Key block
+    kc = discord.ui.Container(accent_color=discord.Color.dark_green())
+    kc.add_item(discord.ui.TextDisplay("**License Key**"))
+    kc.add_item(discord.ui.TextDisplay(f"```\n{k}\n```"))
+    if dm_status:
+        kc.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        kc.add_item(discord.ui.TextDisplay(f"**Delivery** {dm_status}"))
+    result_view.add_item(kc)
 
-    # Footer / metadata container
-    footer = discord.ui.Container(accent_color=discord.Color.dark_gray())
-    footer_lines = [f"-# Generated by {i.user} - {now_iso()[:16].replace('T', ' ')} UTC"]
+    # Footer
+    foot = discord.ui.Container(accent_color=discord.Color.dark_gray())
+    foot_lines = [f"-# Generated by {i.user} - {now_iso()[:16].replace('T', ' ')} UTC"]
     if notes:
-        footer_lines.insert(0, f"**Notes:** {notes}")
-    footer.add_item(discord.ui.TextDisplay("\n".join(footer_lines)))
-    result_view.add_item(footer)
+        foot_lines.insert(0, f"**Notes:** {notes}")
+    foot.add_item(discord.ui.TextDisplay("\n".join(foot_lines)))
+    result_view.add_item(foot)
 
     await i.followup.send(**cv2_send(result_view), ephemeral=True)
     await BOT.log_cv2(result_view)
