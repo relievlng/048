@@ -42,6 +42,7 @@ CONFIG = {
     "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
     "banned_role_id":      env_int("BANNED_ROLE_ID"),
     "fac_paid_role_id":    env_int("FAC_PAID_ROLE_ID"),
+    "hwid_paid_role_id":   env_int("HWID_PAID_ROLE_ID"),
     "db_path":             env("DB_PATH",              "/data/keylock.db"),
     "max_hwid_resets":     env_int("MAX_HWID_RESETS",  1),
     "key_prefix":          env("KEY_PREFIX",           "KL"),
@@ -1119,17 +1120,19 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     ticket="Ticket ID or reference (optional, for authorize)"
 )
 @app_commands.choices(action=[
-    app_commands.Choice(name="authorize (no payment) - ticket approved, free reset",     value="authorize_free"),
-    app_commands.Choice(name="authorize (paid)       - payment received, grants role",   value="authorize_paid"),
-    app_commands.Choice(name="revoke                 - remove their auth",               value="revoke"),
-    app_commands.Choice(name="check                  - view current status",             value="check"),
+    app_commands.Choice(name="authorize (no payment) - ticket approved, free FAC auth",   value="authorize_free"),
+    app_commands.Choice(name="authorize (paid)       - payment received, FAC + role",     value="authorize_paid"),
+    app_commands.Choice(name="reset (no payment)     - clear HWID, free reset",           value="reset_free"),
+    app_commands.Choice(name="reset (paid)           - clear HWID, payment + role",       value="reset_paid"),
+    app_commands.Choice(name="revoke                 - remove their FAC auth",            value="revoke"),
+    app_commands.Choice(name="check                  - view current status",              value="check"),
 ])
 @admin_only()
 async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                   reason: Optional[str] = None, ticket: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     action = action.lower().strip()
-    if action not in ("authorize_free", "authorize_paid", "revoke", "check"):
+    if action not in ("authorize_free", "authorize_paid", "reset_free", "reset_paid", "revoke", "check"):
         await i.followup.send(embed=err_embed("Invalid Action", "Pick an option from the dropdown."), ephemeral=True)
         return
 
@@ -1203,6 +1206,64 @@ async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                 color=discord.Color.green()
             )
             dm_e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+            dm_e.set_footer(text="Contact support if you encounter any issues.")
+            await user.send(embed=dm_e)
+        except Exception:
+            pass
+
+    elif action in ("reset_free", "reset_paid"):
+        paid = action == "reset_paid"
+        # Clear HWID so user can bind a new machine on next loader launch
+        DB.execute("UPDATE users SET hwid=NULL, hwid_resets=hwid_resets+1 WHERE discord_id=?", (did,))
+        DB.commit()
+        detail = f"paid={paid}" + (f" reason={reason}" if reason else "") + (f" ticket={ticket}" if ticket else "")
+        audit("HWID_RESET_FAC", actor_id=str(i.user.id), target_id=did, detail=detail)
+
+        # Assign HWID paid role if payment received and role configured
+        role_assigned = False
+        if paid:
+            hwid_role_id = CONFIG.get("hwid_paid_role_id")
+            if hwid_role_id:
+                hwid_role = i.guild.get_role(hwid_role_id)
+                if hwid_role:
+                    try:
+                        await user.add_roles(hwid_role, reason=f"HWID reset paid - authorized by {i.user}")
+                        role_assigned = True
+                    except Exception as re:
+                        log.warning("Failed to assign HWID paid role: %s", re)
+
+        reset_type = "Payment Received" if paid else "Ticket Approved (No Payment)"
+        e = discord.Embed(
+            title="HWID Reset Approved",
+            description=(
+                "Payment confirmed - HWID cleared and role assigned. User can bind a new machine on next launch."
+                if paid else
+                "Ticket approved - HWID cleared. User can bind a new machine on next launch."
+            ),
+            color=discord.Color.green()
+        )
+        e.add_field(name="User",       value=f"<@{did}> (`{did}`)", inline=False)
+        e.add_field(name="Reset Type", value=reset_type,            inline=True)
+        e.add_field(name="Reset By",   value=str(i.user),           inline=True)
+        if ticket:
+            e.add_field(name="Ticket", value=ticket,                inline=True)
+        if reason:
+            e.add_field(name="Reason", value=reason,                inline=False)
+        if paid:
+            e.add_field(name="Role Assigned", value="Yes" if role_assigned else "Failed - check bot permissions", inline=True)
+        e.set_footer(text=ts())
+        await i.followup.send(embed=e, ephemeral=True)
+        await BOT.log_embed(e)
+        try:
+            dm_e = discord.Embed(
+                title="HWID Reset Approved",
+                description=(
+                    "Your payment has been received and your hardware reset has been approved. Launch the loader to bind your new machine."
+                    if paid else
+                    "Your HWID reset request has been approved. Launch the loader to bind your new machine."
+                ),
+                color=discord.Color.green()
+            )
             dm_e.set_footer(text="Contact support if you encounter any issues.")
             await user.send(embed=dm_e)
         except Exception:
