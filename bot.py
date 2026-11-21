@@ -439,9 +439,10 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
         except Exception:
             pass
 
+    fac_key = gen_fac_key()
     DB.execute(
-        "INSERT INTO users (discord_id,key,hwid,product,status,registered_at,expires_at) VALUES (?,?,?,?,?,?,?)",
-        (did, key.strip().upper(), hashed, pool["product"], "active", now_iso(), pool["expires_at"])
+        "INSERT INTO users (discord_id,key,hwid,product,status,registered_at,expires_at,fac_auth_key) VALUES (?,?,?,?,?,?,?,?)",
+        (did, key.strip().upper(), hashed, pool["product"], "active", now_iso(), pool["expires_at"], fac_key)
     )
     DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (key.strip().upper(),))
     DB.commit()
@@ -460,6 +461,7 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
     e.add_field(name="Product", value=f"{prod_icon} {pool['product']}", inline=True)
     e.add_field(name="Expires", value=fmt_dt(pool["expires_at"]), inline=True)
     e.add_field(name="Auth", value="Your Discord ID is now your license. Keep your account secure.", inline=False)
+    e.add_field(name="FAC Auth Key", value=f"`{fac_key}`\nPresent this key when requesting a FAC reset in a ticket.", inline=False)
     e.set_footer(text=f"{i.user} - {i.user.id}")
     await i.followup.send(embed=e, ephemeral=True)
 
@@ -467,6 +469,7 @@ async def cmd_register(i: discord.Interaction, key: str, hwid: str):
     log_e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
     log_e.add_field(name="Product", value=pool["product"], inline=True)
     log_e.add_field(name="Expires", value=fmt_dt(pool["expires_at"]), inline=True)
+    log_e.add_field(name="FAC Auth Key", value=f"`{fac_key}`", inline=False)
     await BOT.log_embed(log_e)
 
 
@@ -960,6 +963,115 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     await i.followup.send(embed=e, ephemeral=True)
 
 
+@app_commands.command(name="authfac", description="[ADMIN] Authorize a user for a FAC HWID reset (use when they provide a valid ticket reason).")
+@app_commands.describe(
+    user="The user to authorize",
+    ticket="Ticket ID or reference (optional)",
+    reason="Reason for authorizing the FAC reset"
+)
+@admin_only()
+async def cmd_authfac(i: discord.Interaction, user: discord.Member, reason: str, ticket: Optional[str] = None):
+    await i.response.defer(ephemeral=True)
+    did = str(user.id)
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    if not row:
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license record.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    if row["fac_reset_auth"]:
+        e = discord.Embed(title="Already Authorized", color=discord.Color.orange(),
+            description=f"<@{did}> already has an active FAC reset authorization.")
+        e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    DB.execute("UPDATE users SET fac_reset_auth=1 WHERE discord_id=?", (did,))
+    DB.commit()
+
+    detail = f"reason={reason}"
+    if ticket:
+        detail += f" ticket={ticket}"
+    audit("FAC_AUTH_GRANTED", actor_id=str(i.user.id), target_id=did, detail=detail)
+
+    e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+    e.add_field(name="Reason", value=reason, inline=False)
+    if ticket:
+        e.add_field(name="Ticket", value=ticket, inline=True)
+    e.add_field(name="Authorized By", value=str(i.user), inline=True)
+    e.set_footer(text="User can now proceed with their FAC reset. Revoke with /revokefac if needed.")
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
+
+    # Notify the user
+    try:
+        dm_e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
+        dm_e.add_field(name="Status", value="Your FAC reset request has been approved.", inline=False)
+        dm_e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`\nPresent this key to the system when prompted.", inline=False)
+        dm_e.set_footer(text="Contact support if you have any issues.")
+        await user.send(embed=dm_e)
+    except Exception:
+        pass
+
+
+@app_commands.command(name="revokefac", description="[ADMIN] Revoke a user's FAC reset authorization.")
+@app_commands.describe(user="The user to revoke FAC auth from", reason="Reason")
+@admin_only()
+async def cmd_revokefac(i: discord.Interaction, user: discord.Member, reason: Optional[str] = None):
+    await i.response.defer(ephemeral=True)
+    did = str(user.id)
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    if not row:
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license record.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    if not row["fac_reset_auth"]:
+        e = discord.Embed(title="Not Authorized", color=discord.Color.orange(),
+            description=f"<@{did}> does not have an active FAC reset authorization.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    DB.execute("UPDATE users SET fac_reset_auth=0 WHERE discord_id=?", (did,))
+    DB.commit()
+    audit("FAC_AUTH_REVOKED", actor_id=str(i.user.id), target_id=did, detail=reason or "No reason")
+
+    e = discord.Embed(title="FAC Authorization Revoked", color=discord.Color.orange())
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="Reason", value=reason or "No reason given", inline=False)
+    e.add_field(name="By", value=str(i.user), inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
+
+
+@app_commands.command(name="checkfac", description="[ADMIN] Check a user's FAC reset authorization status.")
+@app_commands.describe(user="The user to check")
+@admin_only()
+async def cmd_checkfac(i: discord.Interaction, user: discord.Member):
+    await i.response.defer(ephemeral=True)
+    did = str(user.id)
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    if not row:
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license record.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    authorized = bool(row["fac_reset_auth"])
+    color = discord.Color.green() if authorized else discord.Color.red()
+    status_text = "Authorized" if authorized else "Not Authorized"
+
+    e = discord.Embed(title="FAC Reset Status", color=color)
+    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="FAC Status", value=f"{'✅' if authorized else '❌'} {status_text}", inline=True)
+    e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`" if row["fac_auth_key"] else "N/A", inline=True)
+    await i.followup.send(embed=e, ephemeral=True)
+
+
 @app_commands.command(name="listusers", description="[ADMIN] Browse registered users.")
 @app_commands.describe(status="Filter: active, banned, revoked", product="Filter by product", limit="Results to show (max 25)")
 @admin_only()
@@ -1216,26 +1328,126 @@ async def cmd_invite(i: discord.Interaction):
     await i.followup.send(embed=e, ephemeral=True)
 
 
-async def _send_login_log(discord_id: str, ip: str, product: str, expires_at: str):
-    """Called from the API thread via run_coroutine_threadsafe."""
-    ch = BOT.get_channel(CONFIG["log_channel_id"])
-    if not ch:
-        return
-    # Count total logins for this user
-    total = DB.execute(
+async def _loader_log(embed: discord.Embed):
+    """Send an embed to the dedicated loader event log channel."""
+    ch = BOT.get_channel(CONFIG["loader_log_channel_id"]) or BOT.get_channel(CONFIG["log_channel_id"])
+    if ch:
+        try:
+            await ch.send(embed=embed)
+        except Exception as ex:
+            log.warning("Loader log send failed: %s", ex)
+
+
+async def _send_login_log(discord_id: str, ip: str, hwid_hash: str, product: str, expires_at: str):
+    """Rich login event log - fires on every successful loader auth."""
+    total_ok = DB.execute(
         "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='ok'", (discord_id,)
     ).fetchone()[0]
-    login_e = discord.Embed(title="Login Detected", color=discord.Color.green())
-    login_e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
-    login_e.add_field(name="Product", value=product, inline=True)
-    login_e.add_field(name="IP", value=f"`{ip}`", inline=True)
-    login_e.add_field(name="Expires", value=fmt_dt(expires_at), inline=True)
-    login_e.add_field(name="Total Logins", value=str(total), inline=True)
-    login_e.set_footer(text=fmt_ts(now_iso()))
-    try:
-        await ch.send(embed=login_e)
-    except Exception as e:
-        log.warning("Login log send failed: %s", e)
+    total_all = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=?", (discord_id,)
+    ).fetchone()[0]
+    failed = total_all - total_ok
+
+    # Previous IP for this user (second-most-recent ok login)
+    prev = DB.execute(
+        "SELECT ip FROM login_log WHERE discord_id=? AND status='ok' ORDER BY id DESC LIMIT 2",
+        (discord_id,)
+    ).fetchall()
+    prev_ip = prev[1]["ip"] if len(prev) > 1 else None
+    ip_changed = prev_ip and prev_ip != ip
+
+    e = discord.Embed(
+        title="Loader Login",
+        color=discord.Color.orange() if ip_changed else discord.Color.green()
+    )
+    e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+    e.add_field(name="Product", value=f"`{product}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="HWID (hash)", value=f"`{hwid_hash[:16]}...`", inline=True)
+    e.add_field(name="License Expires", value=fmt_dt(expires_at), inline=True)
+    e.add_field(name="Session #", value=str(total_ok), inline=True)
+    e.add_field(name="Failed Attempts", value=str(failed), inline=True)
+    if ip_changed:
+        e.add_field(name="IP Changed", value=f"`{prev_ip}` - `{ip}`", inline=False)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
+    await _loader_log(e)
+
+
+async def _send_hwid_mismatch_log(discord_id: str, ip: str, stored_hash: str, attempt_hash: str, product: str):
+    """Log a HWID mismatch attempt - someone trying to auth from a different machine."""
+    attempts = DB.execute(
+        "SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='hwid_mismatch'", (discord_id,)
+    ).fetchone()[0]
+
+    e = discord.Embed(title="HWID Mismatch - Auth Blocked", color=discord.Color.red())
+    e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+    e.add_field(name="Product", value=f"`{product}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="Registered HWID", value=f"`{stored_hash[:16]}...`", inline=True)
+    e.add_field(name="Attempted HWID", value=f"`{attempt_hash[:16]}...`", inline=True)
+    e.add_field(name="Total Mismatch Attempts", value=str(attempts + 1), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC - Loader blocked")
+    await _loader_log(e)
+
+
+async def _send_hwid_banned_log(discord_id: str, ip: str, hwid_hash: str):
+    """Log a banned HWID hitting the loader."""
+    e = discord.Embed(title="Banned HWID - Auth Blocked", color=discord.Color.dark_red())
+    e.add_field(name="Discord ID", value=f"`{discord_id}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="HWID (hash)", value=f"`{hwid_hash[:16]}...`", inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC - Loader blocked")
+    await _loader_log(e)
+
+
+async def _send_ip_banned_log(discord_id: str, ip: str):
+    """Log a banned IP hitting the loader."""
+    e = discord.Embed(title="Banned IP - Auth Blocked", color=discord.Color.dark_red())
+    e.add_field(name="Discord ID", value=f"`{discord_id}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC - Loader blocked")
+    await _loader_log(e)
+
+
+async def _send_status_blocked_log(discord_id: str, ip: str, hwid_hash: str, status: str, product: str):
+    """Log a banned/revoked/expired account trying to open the loader."""
+    color_map = {"banned": discord.Color.red(), "revoked": discord.Color.orange(), "expired": discord.Color.greyple()}
+    e = discord.Embed(title=f"Account {status.upper()} - Auth Blocked", color=color_map.get(status, discord.Color.red()))
+    e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+    e.add_field(name="Status", value=f"`{status}`", inline=True)
+    e.add_field(name="Product", value=f"`{product}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="HWID (hash)", value=f"`{hwid_hash[:16]}...`", inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC - Loader blocked")
+    await _loader_log(e)
+
+
+async def _send_macro_event_log(event_type: str, discord_id: str, ip: str, product: str, detail: str = None):
+    """Log macro-side events reported by the loader - destructs, injection failures, etc."""
+    color_map = {
+        "DESTRUCT":    discord.Color.dark_red(),
+        "INJECT_FAIL": discord.Color.red(),
+        "CRASH":       discord.Color.orange(),
+        "CHEAT_START": discord.Color.green(),
+        "CHEAT_STOP":  discord.Color.greyple(),
+    }
+    emoji_map = {
+        "DESTRUCT":    "💣",
+        "INJECT_FAIL": "❌",
+        "CRASH":       "⚠️",
+        "CHEAT_START": "▶️",
+        "CHEAT_STOP":  "⏹️",
+    }
+    color = color_map.get(event_type, discord.Color.blurple())
+    emoji = emoji_map.get(event_type, "📋")
+    e = discord.Embed(title=f"{emoji} Macro Event - {event_type}", color=color)
+    e.add_field(name="User", value=f"<@{discord_id}> (`{discord_id}`)", inline=False)
+    e.add_field(name="Product", value=f"`{product}`", inline=True)
+    e.add_field(name="IP", value=f"`{ip}`", inline=True)
+    if detail:
+        e.add_field(name="Detail", value=detail, inline=False)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
+    await _loader_log(e)
 
 
 @app_commands.command(name="profile",
@@ -1324,6 +1536,9 @@ async def cmd_profile(i: discord.Interaction, query: str):
     e1.add_field(name="Last IP", value=f"`{row['ip_last'] or 'N/A'}`", inline=True)
     e1.add_field(name="HWID Bound", value="Yes" if row["hwid"] else "No", inline=True)
     e1.add_field(name="HWID Resets", value=str(row["hwid_resets"]), inline=True)
+    fac_status = "✅ Authorized" if row["fac_reset_auth"] else "❌ Not Authorized"
+    e1.add_field(name="FAC Reset Auth", value=fac_status, inline=True)
+    e1.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`" if row["fac_auth_key"] else "N/A", inline=True)
     if row["ban_reason"]:
         e1.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
 
@@ -1362,6 +1577,10 @@ class VerifyHandler(BaseHTTPRequestHandler):
             self._out(200, {"status": "ok"})
             return
 
+        if parsed.path == "/macro_event":
+            self._handle_macro_event(parsed)
+            return
+
         if parsed.path != "/verify":
             self._out(404, {"status": "not_found"})
             return
@@ -1377,11 +1596,24 @@ class VerifyHandler(BaseHTTPRequestHandler):
 
         hashed = hash_hwid(raw)
 
+        # Check IP ban first
+        ip_ban_key = f"IP:{ip}"
+        if DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (ip_ban_key,)).fetchone():
+            audit("API_VERIFY_IP_BANNED", target_id=did, ip=ip)
+            DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                       (did, hashed, ip, now_iso(), None, "ip_banned"))
+            DB.commit()
+            asyncio.run_coroutine_threadsafe(_send_ip_banned_log(did, ip), BOT.loop)
+            self._out(403, {"status": "ip_banned", "message": "IP address banned"})
+            return
+
+        # Check HWID ban
         if DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (hashed,)).fetchone():
             audit("API_VERIFY_HWID_BANNED", target_id=did, ip=ip)
             DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
                        (did, hashed, ip, now_iso(), None, "hwid_banned"))
             DB.commit()
+            asyncio.run_coroutine_threadsafe(_send_hwid_banned_log(did, ip, hashed), BOT.loop)
             self._out(403, {"status": "hwid_banned", "message": "HWID banned"})
             return
 
@@ -1400,6 +1632,9 @@ class VerifyHandler(BaseHTTPRequestHandler):
             DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
                        (did, hashed, ip, now_iso(), row["product"], s))
             DB.commit()
+            asyncio.run_coroutine_threadsafe(
+                _send_status_blocked_log(did, ip, hashed, s, row["product"]), BOT.loop
+            )
             self._out(403, {"status": s, "message": f"Account {s}"})
             return
 
@@ -1408,6 +1643,9 @@ class VerifyHandler(BaseHTTPRequestHandler):
             DB.execute("INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
                        (did, hashed, ip, now_iso(), row["product"], "hwid_mismatch"))
             DB.commit()
+            asyncio.run_coroutine_threadsafe(
+                _send_hwid_mismatch_log(did, ip, row["hwid"], hashed, row["product"]), BOT.loop
+            )
             self._out(403, {"status": "hwid_mismatch", "message": "HWID does not match registered machine"})
             return
 
@@ -1423,9 +1661,8 @@ class VerifyHandler(BaseHTTPRequestHandler):
         DB.commit()
         audit("API_VERIFY_OK", target_id=did, ip=ip, detail=f"product={row['product']}")
 
-        # Fire login log to Discord channel (non-blocking)
         asyncio.run_coroutine_threadsafe(
-            _send_login_log(did, ip, row["product"], row["expires_at"]),
+            _send_login_log(did, ip, hashed, row["product"], row["expires_at"]),
             BOT.loop
         )
 
@@ -1435,6 +1672,32 @@ class VerifyHandler(BaseHTTPRequestHandler):
             "product":    row["product"],
             "expires_at": row["expires_at"],
         })
+
+    def _handle_macro_event(self, parsed):
+        """POST-style GET endpoint: loader reports macro events like destructs, crashes, starts."""
+        q       = parse_qs(parsed.query)
+        did     = q.get("discord_id", [None])[0]
+        event   = q.get("event",      [None])[0]  # DESTRUCT, INJECT_FAIL, CRASH, CHEAT_START, CHEAT_STOP
+        product = q.get("product",    ["unknown"])[0]
+        detail  = q.get("detail",     [None])[0]
+        ip      = self.client_address[0]
+
+        if not did or not event:
+            self._out(400, {"status": "error", "message": "Missing discord_id or event"})
+            return
+
+        event = event.upper()
+        valid_events = {"DESTRUCT", "INJECT_FAIL", "CRASH", "CHEAT_START", "CHEAT_STOP"}
+        if event not in valid_events:
+            self._out(400, {"status": "error", "message": f"Unknown event. Valid: {', '.join(valid_events)}"})
+            return
+
+        audit(f"MACRO_{event}", target_id=did, ip=ip, detail=detail)
+        asyncio.run_coroutine_threadsafe(
+            _send_macro_event_log(event, did, ip, product, detail),
+            BOT.loop
+        )
+        self._out(200, {"status": "ok"})
 
     def _out(self, code: int, data: dict):
         body = json.dumps(data).encode()
@@ -1458,6 +1721,7 @@ ALL_COMMANDS = [
     cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
     cmd_addnote, cmd_resethwid, cmd_banhwid, cmd_unbanhwid,
     cmd_extend, cmd_setproduct, cmd_grantresets,
+    cmd_authfac, cmd_revokefac, cmd_checkfac,
     cmd_listusers, cmd_listkeys, cmd_deletekey,
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
