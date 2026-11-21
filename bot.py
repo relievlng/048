@@ -634,19 +634,22 @@ async def cmd_keygen(i: discord.Interaction,
     # DM delivery
     dm_status = None
     if deliver_to:
-        dm_view = StatusView(
-            discord.Color.green(),
-            "Your License Key",
-            [
-                ("Key", f"```{k}```"),
-                ("Product", prod),
-                ("Duration", expires_label),
-                ("How to activate", "Use `/register <key> <hwid>` in the server to activate your license."),
-            ],
-            footer="Keep this key private - do not share it."
+        prod_icon = "🌐" if prod == "public" else "🔒"
+        dm_embed = discord.Embed(
+            title="Your License Key",
+            color=discord.Color.from_rgb(32, 34, 37),
         )
+        dm_embed.add_field(name="Key", value=f"```{k}```", inline=False)
+        dm_embed.add_field(name="Product", value=f"{prod_icon} {prod}", inline=True)
+        dm_embed.add_field(name="Duration", value=expires_label, inline=True)
+        dm_embed.add_field(
+            name="Activation",
+            value="Open the loader and enter your key to activate your license.",
+            inline=False
+        )
+        dm_embed.set_footer(text="Keep this key private - do not share it.")
         try:
-            await deliver_to.send(**cv2_send(dm_view))
+            await deliver_to.send(embed=dm_embed)
             dm_status = f"DM sent to {deliver_to.mention}"
             audit("KEY_DELIVERED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
                   detail=f"key={k[:20]} product={prod}")
