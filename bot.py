@@ -41,6 +41,7 @@ CONFIG = {
     "loader_log_channel_id": env_int("LOADER_LOG_CHANNEL_ID"),  # separate channel for all loader events
     "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
     "banned_role_id":      env_int("BANNED_ROLE_ID"),
+    "fac_paid_role_id":    env_int("FAC_PAID_ROLE_ID"),
     "db_path":             env("DB_PATH",              "/data/keylock.db"),
     "max_hwid_resets":     env_int("MAX_HWID_RESETS",  1),
     "key_prefix":          env("KEY_PREFIX",           "KL"),
@@ -1118,17 +1119,18 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     ticket="Ticket ID or reference (optional, for authorize)"
 )
 @app_commands.choices(action=[
-    app_commands.Choice(name="authorize - approve one HWID reset", value="authorize"),
-    app_commands.Choice(name="revoke   - remove their auth",        value="revoke"),
-    app_commands.Choice(name="check    - view current status",      value="check"),
+    app_commands.Choice(name="authorize (no payment) - ticket approved, free reset",     value="authorize_free"),
+    app_commands.Choice(name="authorize (paid)       - payment received, grants role",   value="authorize_paid"),
+    app_commands.Choice(name="revoke                 - remove their auth",               value="revoke"),
+    app_commands.Choice(name="check                  - view current status",             value="check"),
 ])
 @admin_only()
 async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                   reason: Optional[str] = None, ticket: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     action = action.lower().strip()
-    if action not in ("authorize", "revoke", "check"):
-        await i.followup.send(embed=err_embed("Invalid Action", "Use `authorize`, `revoke`, or `check`."), ephemeral=True)
+    if action not in ("authorize_free", "authorize_paid", "revoke", "check"):
+        await i.followup.send(embed=err_embed("Invalid Action", "Pick an option from the dropdown."), ephemeral=True)
         return
 
     did = str(user.id)
@@ -1137,7 +1139,8 @@ async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
         await i.followup.send(embed=err_embed("Not Registered", "That user has no license record."), ephemeral=True)
         return
 
-    if action == "authorize":
+    if action in ("authorize_free", "authorize_paid"):
+        paid = action == "authorize_paid"
         if not reason:
             await i.followup.send(embed=err_embed("Reason Required", "A reason is required when authorizing a FAC reset."), ephemeral=True)
             return
@@ -1152,26 +1155,51 @@ async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
             return
         DB.execute("UPDATE users SET fac_reset_auth=1 WHERE discord_id=?", (did,))
         DB.commit()
-        detail = f"reason={reason}" + (f" ticket={ticket}" if ticket else "")
+        detail = f"paid={paid} reason={reason}" + (f" ticket={ticket}" if ticket else "")
         audit("FAC_AUTH_GRANTED", actor_id=str(i.user.id), target_id=did, detail=detail)
+
+        # Assign FAC paid role if payment was received and role is configured
+        role_assigned = False
+        if paid:
+            fac_role_id = CONFIG.get("fac_paid_role_id")
+            if fac_role_id:
+                fac_role = i.guild.get_role(fac_role_id)
+                if fac_role:
+                    try:
+                        await user.add_roles(fac_role, reason=f"FAC paid - authorized by {i.user}")
+                        role_assigned = True
+                    except Exception as re:
+                        log.warning("Failed to assign FAC paid role: %s", re)
+
+        auth_type = "Payment Received" if paid else "Ticket Approved (No Payment)"
         e = discord.Embed(
             title="FAC Reset Authorized",
-            description="User has been approved for one hardware ID reset. They have been DM'd their auth key.",
+            description=(
+                "Payment confirmed - FAC reset approved and role assigned." if paid
+                else "Ticket approved - FAC reset authorized, no payment required."
+            ),
             color=discord.Color.green()
         )
-        e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
-        e.add_field(name="Reason", value=reason, inline=True)
+        e.add_field(name="User",          value=f"<@{did}> (`{did}`)", inline=False)
+        e.add_field(name="Auth Type",     value=auth_type,             inline=True)
+        e.add_field(name="Authorized By", value=str(i.user),           inline=True)
         if ticket:
-            e.add_field(name="Ticket", value=ticket, inline=True)
-        e.add_field(name="Authorized By", value=str(i.user), inline=True)
-        e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+            e.add_field(name="Ticket",    value=ticket,                inline=True)
+        e.add_field(name="Reason",        value=reason,                inline=False)
+        e.add_field(name="FAC Auth Key",  value=f"`{row['fac_auth_key']}`", inline=True)
+        if paid:
+            e.add_field(name="Role Assigned", value="Yes" if role_assigned else "Failed - check bot permissions", inline=True)
         e.set_footer(text=ts())
         await i.followup.send(embed=e, ephemeral=True)
         await BOT.log_embed(e)
         try:
             dm_e = discord.Embed(
                 title="FAC Reset Approved",
-                description="Your request to reset your hardware ID has been approved. Present your auth key when prompted by the loader.",
+                description=(
+                    "Your payment has been received and your hardware reset request has been approved."
+                    if paid else
+                    "Your request to reset your hardware ID has been approved. Present your auth key when prompted by the loader."
+                ),
                 color=discord.Color.green()
             )
             dm_e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
