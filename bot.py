@@ -2178,17 +2178,7 @@ async def cmd_seed(i: discord.Interaction,
     await BOT.log_embed(e)
 
 
-ALL_COMMANDS = [
-    cmd_register, cmd_mystatus,
-    cmd_keygen, cmd_lookup, cmd_ban, cmd_unban, cmd_revoke,
-    cmd_addnote, cmd_resethwid, cmd_hwid,
-    cmd_extend, cmd_setproduct, cmd_grantresets,
-    cmd_fac,
-    cmd_listusers, cmd_listkeys, cmd_deletekey,
-    cmd_auditlog, cmd_stats, cmd_announce,
-    cmd_purgeexpired, cmd_wipeuser, cmd_invite,
-    cmd_test, cmd_seed,
-]
+ALL_COMMANDS = []  # All slash commands live on the staff bot now
 
 async def main():
     global DB, BOT
