@@ -1462,8 +1462,9 @@ async def cmd_profile(i: discord.Interaction, query: str):
         DB.execute("SELECT * FROM users WHERE key=?", (query.strip().upper(),)).fetchone()
     )
     if not row:
-        view = SimpleView(discord.Color.red(), "**Not Found**", "No user matched that query.")
-        await i.followup.send(**cv2_send(view), ephemeral=True)
+        e = discord.Embed(title="Not Found", color=discord.Color.red(),
+            description=f"No user matched `{query}`.\nUse `/seed` to create a test record, or check the ID/key.")
+        await i.followup.send(embed=e, ephemeral=True)
         return
 
     did = row["discord_id"]
@@ -1857,6 +1858,101 @@ async def cmd_test(i: discord.Interaction,
     await i.followup.send(embeds=[e1, e2, e3], ephemeral=True)
 
 
+@app_commands.command(name="seed", description="[ADMIN] Create a test user record for any Discord user so all commands work on them.")
+@app_commands.describe(
+    user="Target user to seed",
+    product="Product tier (default: private)",
+    duration="Lifetime, 1month, etc (default: lifetime)",
+    fake_hwid="Raw HWID string to bind (default: auto-generated)",
+    fake_ip="IP to record as last known (default: 127.0.0.1)"
+)
+@app_commands.autocomplete(duration=autocomplete_duration, product=autocomplete_product)
+@admin_only()
+async def cmd_seed(i: discord.Interaction,
+                   user: discord.Member,
+                   product: str = "private",
+                   duration: str = "lifetime",
+                   fake_hwid: Optional[str] = None,
+                   fake_ip: Optional[str] = "127.0.0.1"):
+    await i.response.defer(ephemeral=True)
+    did = str(user.id)
+
+    # Already registered?
+    existing = DB.execute("SELECT key FROM users WHERE discord_id=?", (did,)).fetchone()
+    if existing:
+        e = discord.Embed(title="Already Registered", color=discord.Color.orange(),
+            description=f"<@{did}> already has a license (`{existing['key']}`).\n"
+                        f"Use `/lookup` or `/profile` to view them, or `/wipeuser` to reset first.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    prod = product.lower().strip()
+    dur_key = duration.lower().replace(" ", "")
+    if dur_key not in DURATION_PRESETS:
+        opts = ", ".join(f"`{k}`" for k in DURATION_PRESETS)
+        e = discord.Embed(title="Bad Duration", color=discord.Color.red(),
+            description=f"Choose one: {opts}")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    delta = DURATION_PRESETS[dur_key]
+    exp_iso = None
+    expires_label = "Lifetime"
+    if delta is not None:
+        exp_dt = datetime.now(timezone.utc) + delta
+        exp_iso = exp_dt.isoformat()
+        expires_label = exp_dt.strftime("%Y-%m-%d")
+
+    # Generate a key and insert directly into key_pool as claimed
+    k = gen_key(CONFIG["key_prefix"])
+    ip = fake_ip or "127.0.0.1"
+    hwid_raw = fake_hwid or f"SEED_HWID_{did}"
+    hwid_hash = hash_hwid(hwid_raw)
+    fac_key = gen_fac_key()
+
+    DB.execute(
+        "INSERT OR IGNORE INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?,?)",
+        (k, prod, prod, now_iso(), exp_iso, str(i.user.id), "Seeded test record")
+    )
+    DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (k,))
+    DB.execute(
+        "INSERT INTO users (discord_id,key,hwid,product,status,registered_at,expires_at,ip_last,last_seen,fac_auth_key) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (did, k, hwid_hash, prod, "active", now_iso(), exp_iso, ip, now_iso(), fac_key)
+    )
+    # Seed a login_log entry so lookups have history
+    DB.execute(
+        "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+        (did, hwid_hash, ip, now_iso(), prod, "ok")
+    )
+    DB.commit()
+
+    # Grant verified role
+    try:
+        vr = i.guild.get_role(CONFIG["verified_role_id"])
+        if vr:
+            await user.add_roles(vr, reason="KeyLock seed")
+    except Exception:
+        pass
+
+    audit("SEED_USER", actor_id=str(i.user.id), target_id=did,
+          detail=f"product={prod} duration={dur_key}")
+
+    prod_icon = "🌐" if prod == "public" else "🔒"
+    e = discord.Embed(title="Test Record Seeded", color=discord.Color.green(),
+        description="User is now fully registered. All commands will work on them.")
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="License Key", value=f"`{k}`", inline=False)
+    e.add_field(name="Product", value=f"{prod_icon} `{prod}`", inline=True)
+    e.add_field(name="Expires", value=f"`{expires_label}`", inline=True)
+    e.add_field(name="HWID Bound", value=f"`{hwid_raw}`", inline=False)
+    e.add_field(name="Seeded IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="FAC Auth Key", value=f"`{fac_key}`", inline=True)
+    e.set_footer(text=f"Seeded by {i.user} - {now_iso()[:19].replace('T', ' ')} UTC")
+    await i.followup.send(embed=e, ephemeral=True)
+    await BOT.log_embed(e)
+
+
 ALL_COMMANDS = [
     cmd_register, cmd_mystatus,
     cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
@@ -1866,7 +1962,7 @@ ALL_COMMANDS = [
     cmd_listusers, cmd_listkeys, cmd_deletekey,
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
-    cmd_test,
+    cmd_test, cmd_seed,
 ]
 
 async def main():
