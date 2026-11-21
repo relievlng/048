@@ -272,12 +272,6 @@ class KeyLock(commands.Bot):
     async def setup_hook(self):
         g = discord.Object(id=CONFIG["guild_id"])
         self.tree.copy_global_to(guild=g)
-        # Sync command tree so slash commands are registered
-        try:
-            synced = await self.tree.sync(guild=g)
-            log.info("Commands synced to guild %d (%d commands)", CONFIG["guild_id"], len(synced))
-        except Exception as e:
-            log.error("Command sync failed: %s", e)
         expire_checker.start()
 
     async def on_ready(self):
@@ -285,16 +279,20 @@ class KeyLock(commands.Bot):
         await self.change_presence(
             activity=discord.Activity(type=discord.ActivityType.watching, name="the vault")
         )
-        # Print invite URL to logs on startup
         perms = discord.Permissions(
-            send_messages=True,
-            embed_links=True,
-            manage_roles=True,
-            read_messages=True,
+            send_messages=True, embed_links=True,
+            manage_roles=True, read_messages=True,
             use_application_commands=True,
         )
         url = discord.utils.oauth_url(self.user.id, permissions=perms)
         log.info("INVITE URL: %s", url)
+        # Sync commands once after bot is fully connected
+        try:
+            g = discord.Object(id=CONFIG["guild_id"])
+            synced = await self.tree.sync(guild=g)
+            log.info("Commands synced: %d", len(synced))
+        except Exception as e:
+            log.error("Command sync failed: %s", e)
 
     async def log_cv2(self, view: discord.ui.LayoutView):
         ch = self.get_channel(CONFIG["log_channel_id"])
