@@ -226,7 +226,6 @@ class StaffBot(discord.Client):
 
         log.info("[setup] Starting log channel setup in %s", guild.name)
         existing_cats = {c.name.upper(): c for c in guild.categories}
-        existing_chs  = {c.name.lower(): c for c in guild.text_channels}
 
         webhooks = {}
         try:
@@ -242,13 +241,16 @@ class StaffBot(discord.Client):
 
                 for ch_name in sec["channels"]:
                     env_key = f"WEBHOOK_{sec['key']}_{ch_name.upper().replace('-','_')}"
-                    ch_obj  = existing_chs.get(ch_name.lower())
+                    # Scope lookup to THIS category so same-named channels in
+                    # different sections (e.g. #verifications in MAIN vs CUSTOMER)
+                    # are created independently rather than reusing the wrong one.
+                    ch_obj = discord.utils.get(cat_obj.channels, name=ch_name)
                     if not ch_obj:
                         ch_obj = await guild.create_text_channel(ch_name, category=cat_obj)
-                        log.info("[setup]     Created #%s", ch_name)
+                        log.info("[setup]     Created #%s in %s", ch_name, sec["name"])
                         await asyncio.sleep(0.4)
                     else:
-                        log.info("[setup]     Channel #%s exists", ch_name)
+                        log.info("[setup]     Channel #%s exists in %s", ch_name, sec["name"])
 
                     # Reuse existing LogDash webhook if present, create if not
                     existing_whs = await ch_obj.webhooks()
