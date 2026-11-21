@@ -1716,6 +1716,45 @@ def start_api(port: int):
 
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
+@app_commands.command(name="testlogin", description="[ADMIN] Simulate a loader login event for a registered user.")
+@app_commands.describe(user="Target user to simulate login for", fake_ip="Fake IP to use (default: 127.0.0.1)")
+@admin_only()
+async def cmd_testlogin(i: discord.Interaction, user: discord.Member, fake_ip: Optional[str] = "127.0.0.1"):
+    await i.response.defer(ephemeral=True)
+    did = str(user.id)
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    if not row:
+        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
+            description="That user has no license record.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
+    ip = fake_ip or "127.0.0.1"
+    hwid_hash = row["hwid"] or hash_hwid("TEST_HWID_" + did)
+
+    # Write a real login_log entry so session/fail counts are accurate
+    DB.execute(
+        "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+        (did, hwid_hash, ip, now_iso(), row["product"], "ok")
+    )
+    # Update last_seen and ip_last just like a real verify
+    DB.execute("UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?",
+               (now_iso(), ip, did))
+    DB.commit()
+    audit("TEST_LOGIN", actor_id=str(i.user.id), target_id=did, detail=f"ip={ip}")
+
+    # Fire the full rich loader log
+    await _send_login_log(did, ip, hwid_hash, row["product"], row["expires_at"])
+
+    e = discord.Embed(title="Test Login Fired", color=discord.Color.blurple())
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="Product", value=f"`{row['product']}`", inline=True)
+    e.add_field(name="Fake IP", value=f"`{ip}`", inline=True)
+    e.add_field(name="HWID Hash", value=f"`{hwid_hash[:16]}...`", inline=True)
+    e.set_footer(text="Login log entry written - check your loader log channel.")
+    await i.followup.send(embed=e, ephemeral=True)
+
+
 ALL_COMMANDS = [
     cmd_register, cmd_mystatus,
     cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
@@ -1725,6 +1764,7 @@ ALL_COMMANDS = [
     cmd_listusers, cmd_listkeys, cmd_deletekey,
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
+    cmd_testlogin,
 ]
 
 async def main():
