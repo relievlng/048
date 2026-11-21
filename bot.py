@@ -210,8 +210,10 @@ def parse_date(s: str) -> Optional[str]:
 # ─── COMPONENTS V2 HELPERS ────────────────────────────────────────────────────
 
 def cv2_send(view: discord.ui.LayoutView) -> dict:
-    """Returns kwargs for followup.send / channel.send with CV2 flag."""
-    return {"view": view, "flags": discord.MessageFlags(is_components_v2=True)}
+    """Returns kwargs for followup.send / channel.send with CV2 flag.
+    Flag bit 15 (32768) = IS_COMPONENTS_V2. Using value= for version compatibility."""
+    flags = discord.MessageFlags(value=1 << 15)
+    return {"view": view, "flags": flags}
 
 class SimpleView(discord.ui.LayoutView):
     """Single-container CV2 message."""
