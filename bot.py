@@ -520,6 +520,14 @@ async def autocomplete_product(i: discord.Interaction, current: str):
         for o in options if current.lower() in o
     ]
 
+PRODUCT_ICONS: dict[str, str] = {
+    "private":  "🔒",
+    "public":   "🌐",
+    "lifetime": "♾️",
+    "trial":    "⏳",
+    "default":  "🔑",
+}
+
 DURATION_PRESETS = {
     "1day":    timedelta(days=1),
     "3days":   timedelta(days=3),
