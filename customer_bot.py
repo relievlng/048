@@ -5,14 +5,13 @@ Handles: ticket system, rules embed, verification, key lookup, HWID resets
 """
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from discord import app_commands
 import sqlite3
 import logging
 import asyncio
 import aiohttp
 import os
-import json
 from datetime import datetime, timezone
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -31,29 +30,53 @@ def env_int(key: str, default: int = 0) -> int:
         return default
 
 CONFIG = {
-    "token":                  env("DISCORD_TOKEN") or env("TOKEN"),
-    "guild_id":               env_int("GUILD_ID"),
-    "admin_role_id":          env_int("ADMIN_ROLE_ID"),
-    "verified_role_id":       env_int("VERIFIED_ROLE_ID"),
-    "setup_pings_role_id":    env_int("SETUP_PINGS_ROLE_ID"),
+    "token":                   env("DISCORD_TOKEN") or env("TOKEN"),
+    "guild_id":                env_int("GUILD_ID"),
+    "admin_role_id":           env_int("ADMIN_ROLE_ID"),
+    "verified_role_id":        env_int("VERIFIED_ROLE_ID"),
+    "setup_pings_role_id":     env_int("SETUP_PINGS_ROLE_ID"),
     "setup_alerts_channel_id": env_int("SETUP_ALERTS_CHANNEL_ID"),
-    "ticket_category_id":     env_int("TICKET_CATEGORY_ID"),
-    "rules_channel_id":       env_int("RULES_CHANNEL_ID"),
-    "verify_channel_id":      env_int("VERIFY_CHANNEL_ID"),
-    "hwid_channel_id":        env_int("HWID_CHANNEL_ID"),
-    "ticket_channel_id":      env_int("TICKET_CHANNEL_ID"),
+    "ticket_category_id":      env_int("TICKET_CATEGORY_ID"),
+    "rules_channel_id":        env_int("RULES_CHANNEL_ID"),
+    "verify_channel_id":       env_int("VERIFY_CHANNEL_ID"),
+    "hwid_channel_id":         env_int("HWID_CHANNEL_ID"),
+    "ticket_channel_id":       env_int("TICKET_CHANNEL_ID"),
     # Per-channel webhook URLs (from staff bot's auto-setup output)
-    "wh_tickets_opened":      env("WEBHOOK_CUSTOMER_TICKETS_OPENED"),
-    "wh_tickets_closed":      env("WEBHOOK_CUSTOMER_TICKETS_CLOSED"),
-    "wh_ticket_transcripts":  env("WEBHOOK_CUSTOMER_TICKET_TRANSCRIPTS"),
-    "wh_key_generated":       env("WEBHOOK_CUSTOMER_KEY_GENERATED"),
-    "wh_bans":                env("WEBHOOK_CUSTOMER_BANS"),
+    "wh_verifications":        env("WEBHOOK_CUSTOMER_VERIFICATIONS"),
+    "wh_hwid_resets":          env("WEBHOOK_CUSTOMER_HWID_RESETS"),
+    "wh_tickets_opened":       env("WEBHOOK_CUSTOMER_TICKETS_OPENED"),
+    "wh_tickets_closed":       env("WEBHOOK_CUSTOMER_TICKETS_CLOSED"),
+    "wh_ticket_transcripts":   env("WEBHOOK_CUSTOMER_TICKET_TRANSCRIPTS"),
+    "wh_key_generated":        env("WEBHOOK_CUSTOMER_KEY_GENERATED"),
+    "wh_bans":                 env("WEBHOOK_CUSTOMER_BANS"),
     # Fallback: single webhook for any event type not explicitly wired
-    "log_webhook_url":        env("LOG_WEBHOOK_URL"),
-    "db_path":                env("DB_PATH", "/data/keylock.db"),
-    "key_prefix":             env("KEY_PREFIX", "KL"),
-    "api_port":               env_int("PORT", 8080),
+    "log_webhook_url":         env("LOG_WEBHOOK_URL"),
+    "db_path":                 env("DB_PATH", "/data/keylock.db"),
+    "key_prefix":              env("KEY_PREFIX", "KL"),
+    "api_port":                env_int("PORT", 8080),
+    "max_hwid_resets":         env_int("MAX_HWID_RESETS", 1),
 }
+
+# ─── CUSTOM EMOJIS ────────────────────────────────────────────────────────────
+# Upload the SVGs from /emojis/ to your Discord server, then paste the
+# <:name:id> strings here. Until then the fallback Unicode chars show fine.
+
+EMOJIS = {
+    "verify":  env("EMOJI_VERIFY",  "<:verify:EMOJI_ID>"),
+    "key":     env("EMOJI_KEY",     "<:key:EMOJI_ID>"),
+    "chip":    env("EMOJI_CHIP",    "<:chip:EMOJI_ID>"),
+    "ticket":  env("EMOJI_TICKET",  "<:ticket:EMOJI_ID>"),
+    "rules":   env("EMOJI_RULES",   "<:rules:EMOJI_ID>"),
+    "cross":   env("EMOJI_CROSS",   "<:cross:EMOJI_ID>"),
+    "shield":  env("EMOJI_SHIELD",  "<:shield:EMOJI_ID>"),
+    "arrow":   env("EMOJI_ARROW",   "<:arrow:EMOJI_ID>"),
+    "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
+    "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
+}
+
+def e(name: str) -> str:
+    """Return the custom emoji string for a given name."""
+    return EMOJIS.get(name, "")
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -97,7 +120,7 @@ def register_key_to_discord(key: str, discord_id: str) -> bool:
         if not row:
             return False
         if row["discord_id"] and row["discord_id"] != str(discord_id):
-            return False  # already claimed by someone else
+            return False
         conn.execute(
             "UPDATE users SET discord_id = ? WHERE key = ?",
             (str(discord_id), key.upper())
@@ -116,34 +139,54 @@ def reset_hwid(discord_id: str) -> tuple[bool, str]:
             return False, "No key linked to your account."
         max_resets = CONFIG.get("max_hwid_resets", 1)
         if row["hwid_resets"] >= max_resets:
-            return False, f"You have used all {max_resets} HWID reset(s). Contact staff for further assistance."
+            return False, f"You have used all {max_resets} HWID reset(s). Open a ticket for further assistance."
         conn.execute(
             "UPDATE users SET hwid = NULL, hwid_resets = hwid_resets + 1 WHERE discord_id = ?",
             (str(discord_id),)
         )
         conn.commit()
-        return True, f"HWID reset successful. You have {max_resets - row['hwid_resets'] - 1} reset(s) remaining."
+        remaining = max_resets - row["hwid_resets"] - 1
+        return True, f"HWID reset successfully. You have **{remaining}** reset(s) remaining."
 
-# ─── WEBHOOK LOGGING ──────────────────────────────────────────────────────────
+# ─── WEBHOOK LOGGING (Components v2) ──────────────────────────────────────────
 
-async def send_log(title: str, description: str, color: int = 0x5865F2, fields: list = None, webhook_key: str = "log_webhook_url"):
-    """Send an embed to the appropriate staff log channel.
-    webhook_key: CONFIG key for the specific channel webhook (falls back to log_webhook_url)."""
+async def send_log(
+    title: str,
+    description: str,
+    color: int = 0x5865F2,
+    fields: list = None,
+    webhook_key: str = "log_webhook_url",
+):
+    """Send a Components v2 container to the appropriate staff log channel."""
     url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
     if not url:
         return
-    embed = {
-        "title": title,
-        "description": description,
-        "color": color,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "fields": fields or [],
+
+    parts = [f"### {title}", description]
+    if fields:
+        for field in fields:
+            parts.append(f"\n**{field['name']}**\n{field['value']}")
+
+    payload = {
+        "flags": 1 << 15,  # IS_COMPONENTS_V2
+        "components": [
+            {
+                "type": 17,       # Container
+                "accent_color": color,
+                "components": [
+                    {
+                        "type": 10,   # Text Display
+                        "content": "\n".join(parts),
+                    }
+                ],
+            }
+        ],
     }
     try:
         async with aiohttp.ClientSession() as session:
-            await session.post(url, json={"embeds": [embed]})
-    except Exception as e:
-        log.warning(f"Webhook log failed: {e}")
+            await session.post(url, json=payload)
+    except Exception as exc:
+        log.warning(f"Webhook log failed: {exc}")
 
 # ─── HEALTH SERVER ─────────────────────────────────────────────────────────────
 
@@ -161,13 +204,48 @@ def start_health_server(port: int):
     t.start()
     log.info(f"Health server on :{port}")
 
+# ─── COMPONENTS v2 HELPERS ────────────────────────────────────────────────────
+
+def _container(text: str, color: int = 0x2b2d31) -> discord.ui.Container:
+    """Build a Components v2 Container with a single TextDisplay child."""
+    return discord.ui.Container(
+        discord.ui.TextDisplay(text),
+        accent_colour=discord.Colour(color),
+    )
+
+async def _send_v2(
+    channel: discord.TextChannel,
+    text: str,
+    color: int = 0x2b2d31,
+    view: discord.ui.View = None,
+):
+    """Send a Components v2 message to a channel."""
+    kwargs = {
+        "components": [_container(text, color)],
+    }
+    if view:
+        kwargs["view"] = view
+    await channel.send(**kwargs)
+
+async def _reply_v2(
+    interaction: discord.Interaction,
+    text: str,
+    color: int = 0x2b2d31,
+    ephemeral: bool = True,
+):
+    """Respond to an interaction with a Components v2 message."""
+    await interaction.response.send_message(
+        components=[_container(text, color)],
+        ephemeral=ephemeral,
+    )
+
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":  {"label": "Support",           "emoji": "✉️",  "desc": "Product support or general enquiries"},
-    "setup":    {"label": "Setup",             "emoji": "🖱️",  "desc": "First time setup and installation"},
-    "billing":  {"label": "Billing",           "emoji": "🛒",  "desc": "Purchases, renewals and refunds"},
-    "key":      {"label": "Key / HWID Issues", "emoji": "🔑",  "desc": "Key problems and HWID resets"},
+    "support":  {"label": "Support",           "emoji": e("ticket"),   "desc": "Product support or general enquiries"},
+    "setup":    {"label": "Setup",             "emoji": e("arrow"),    "desc": "First time setup and installation"},
+    "billing":  {"label": "Billing",           "emoji": e("shield"),   "desc": "Purchases, renewals and refunds"},
+    "key":      {"label": "Key / HWID Issues", "emoji": e("key"),      "desc": "Key problems and HWID resets"},
 }
 
 class TicketPanelView(discord.ui.View):
@@ -176,7 +254,7 @@ class TicketPanelView(discord.ui.View):
         for cat_id, cat in TICKET_CATEGORIES.items():
             btn = discord.ui.Button(
                 label=cat["label"],
-                emoji=cat["emoji"],
+                emoji=None,
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"ticket_open_{cat_id}",
             )
@@ -193,29 +271,31 @@ class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="ticket_close")
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await close_ticket(interaction)
 
-    @discord.ui.button(label="Claim", emoji="👤", style=discord.ButtonStyle.secondary, custom_id="ticket_claim")
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.secondary, custom_id="ticket_claim")
     async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             f"**{interaction.user.mention}** has claimed this ticket.", ephemeral=False
         )
+
 
 async def open_ticket(interaction: discord.Interaction, cat_id: str):
     guild = interaction.guild
     member = interaction.user
     cat_info = TICKET_CATEGORIES[cat_id]
 
-    # Check for existing open ticket
     existing = discord.utils.get(
         guild.text_channels,
         name=f"ticket-{member.name.lower().replace(' ', '-')}"
     )
     if existing:
-        await interaction.response.send_message(
-            f"You already have an open ticket: {existing.mention}", ephemeral=True
+        await _reply_v2(
+            interaction,
+            f"You already have an open ticket: {existing.mention}\n\n-# Close your existing ticket before opening a new one.",
+            color=0xFEE75C,
         )
         return
 
@@ -224,11 +304,14 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        member: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        ),
     }
     if admin_role:
         overwrites[admin_role] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
+            view_channel=True, send_messages=True,
+            read_message_history=True, manage_channels=True
         )
 
     channel = await guild.create_text_channel(
@@ -238,36 +321,38 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         topic=f"{cat_info['label']} | {member} ({member.id})",
     )
 
-    embed = discord.Embed(
-        title=f"{cat_info['emoji']} {cat_info['label']} Ticket",
-        description=(
-            f"Hey {member.mention}, thanks for reaching out!\n\n"
-            f"**Category:** {cat_info['desc']}\n\n"
-            "Please describe your issue and a staff member will be with you shortly.\n"
-            "Use the button below to close your ticket when resolved."
-        ),
-        color=0x2b2d31,
-        timestamp=datetime.now(timezone.utc),
+    text = (
+        f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
+        f"Hey {member.mention}, thanks for reaching out.\n\n"
+        f"**Category** {cat_info['desc']}\n\n"
+        "Describe your issue and a staff member will be with you shortly.\n"
+        "Use the **Close Ticket** button below when your issue is resolved.\n\n"
+        f"-# Ticket opened by {member}"
     )
-    embed.set_footer(text=f"Ticket opened by {member}", icon_url=member.display_avatar.url)
-
     mention_str = admin_role.mention if admin_role else ""
     await channel.send(
         content=f"{member.mention} {mention_str}",
-        embed=embed,
+        components=[_container(text, 0x2b2d31)],
         view=TicketControlView(),
     )
 
-    await interaction.response.send_message(
-        f"Your ticket has been opened: {channel.mention}", ephemeral=True
+    await _reply_v2(
+        interaction,
+        f"{e('arrow')} Your ticket has been opened: {channel.mention}",
+        color=0x57F287,
     )
 
     await send_log(
-        title="Ticket Opened",
-        description=f"**User:** {member.mention} (`{member.id}`)\n**Category:** {cat_info['label']}\n**Channel:** {channel.mention}",
+        title=f"{e('ticket')} Ticket Opened",
+        description=(
+            f"**User** {member.mention} (`{member.id}`)\n"
+            f"**Category** {cat_info['label']}\n"
+            f"**Channel** {channel.mention}"
+        ),
         color=0x57F287,
         webhook_key="wh_tickets_opened",
     )
+
 
 async def close_ticket(interaction: discord.Interaction):
     channel = interaction.channel
@@ -275,13 +360,11 @@ async def close_ticket(interaction: discord.Interaction):
     is_admin = admin_role and admin_role in interaction.user.roles
 
     if not is_admin and not channel.name.startswith("ticket-"):
-        await interaction.response.send_message("You cannot close this ticket.", ephemeral=True)
+        await _reply_v2(interaction, f"{e('cross')} You cannot close this ticket.", color=0xED4245)
         return
 
     await interaction.response.send_message("Closing ticket in 5 seconds...")
 
-    # Build transcript (message content requires the privileged message_content
-    # intent - if not enabled, content will be empty; we log what we can)
     messages = []
     msg_count = 0
     async for msg in channel.history(limit=200, oldest_first=True):
@@ -292,16 +375,19 @@ async def close_ticket(interaction: discord.Interaction):
     transcript = "\n".join(messages) if messages else f"No messages recorded ({msg_count} total)."
 
     await send_log(
-        title="Ticket Closed",
-        description=f"**Channel:** {channel.name}\n**Closed by:** {interaction.user.mention}\n**Messages:** {msg_count}",
+        title=f"{e('ticket')} Ticket Closed",
+        description=(
+            f"**Channel** {channel.name}\n"
+            f"**Closed by** {interaction.user.mention}\n"
+            f"**Messages** {msg_count}"
+        ),
         color=0xED4245,
         webhook_key="wh_tickets_closed",
     )
-    # Post transcript to its own channel if configured
     if transcript:
         await send_log(
             title=f"Transcript - {channel.name}",
-            description=f"```{transcript[:1900]}```",
+            description=f"```\n{transcript[:1900]}\n```",
             color=0x5865F2,
             webhook_key="wh_ticket_transcripts",
         )
@@ -326,22 +412,27 @@ class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
 
         row = lookup_key(key)
         if not row:
-            await interaction.response.send_message(
-                "Invalid key. Please check your key and try again.", ephemeral=True
+            await _reply_v2(
+                interaction,
+                f"{e('cross')} **Invalid key.**\nPlease check your key and try again.",
+                color=0xED4245,
             )
             return
 
         if row["status"] == "banned":
-            await interaction.response.send_message(
-                "This key has been banned. Contact staff if you believe this is an error.", ephemeral=True
+            await _reply_v2(
+                interaction,
+                f"{e('cross')} **This key has been banned.**\nContact staff if you believe this is an error.",
+                color=0xED4245,
             )
             return
 
-        # Link key to discord ID
         ok = register_key_to_discord(key, member.id)
         if not ok:
-            await interaction.response.send_message(
-                "This key is already linked to another Discord account. Contact staff.", ephemeral=True
+            await _reply_v2(
+                interaction,
+                f"{e('cross')} **This key is already linked to another account.**\nContact staff for assistance.",
+                color=0xED4245,
             )
             return
 
@@ -352,17 +443,27 @@ class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
         expires = row["expires_at"] or "Never"
         product = row["product"] or "default"
 
-        await interaction.response.send_message(
-            f"Verified! You now have access to the server.\n"
-            f"**Key:** `{key}`\n**Product:** {product}\n**Expires:** {expires}",
-            ephemeral=True,
+        await _reply_v2(
+            interaction,
+            (
+                f"{e('verify')} **Verified successfully.**\n"
+                f"You now have access to the server.\n\n"
+                f"**Key** `{key}`\n"
+                f"**Product** {product}\n"
+                f"**Expires** {expires}"
+            ),
+            color=0x57F287,
         )
 
         await send_log(
-            title="User Verified",
-            description=f"**User:** {member.mention} (`{member.id}`)\n**Key:** `{key}`\n**Product:** {product}",
+            title=f"{e('verify')} User Verified",
+            description=(
+                f"**User** {member.mention} (`{member.id}`)\n"
+                f"**Key** `{key}`\n"
+                f"**Product** {product}"
+            ),
             color=0x57F287,
-            webhook_key="wh_key_generated",
+            webhook_key="wh_verifications",
         )
 
 
@@ -370,12 +471,15 @@ class VerifyView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify", emoji="✅", style=discord.ButtonStyle.success, custom_id="verify_button")
+    @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_button")
     async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if already verified
         verified_role = interaction.guild.get_role(CONFIG["verified_role_id"])
         if verified_role and verified_role in interaction.user.roles:
-            await interaction.response.send_message("You are already verified!", ephemeral=True)
+            await _reply_v2(
+                interaction,
+                f"{e('verify')} You are already verified.",
+                color=0x57F287,
+            )
             return
         await interaction.response.send_modal(VerifyModal())
 
@@ -385,29 +489,27 @@ class HWIDView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Reset HWID", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="hwid_reset_button")
+    @discord.ui.button(label="Reset HWID", style=discord.ButtonStyle.secondary, custom_id="hwid_reset_button")
     async def hwid_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         success, message = reset_hwid(str(interaction.user.id))
         if success:
-            embed = discord.Embed(
-                title="HWID Reset Successful",
-                description=message,
+            await _reply_v2(
+                interaction,
+                f"{e('chip')} **HWID Reset Successful**\n\n{message}",
                 color=0x57F287,
             )
             await send_log(
-                title="HWID Reset",
-                description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)",
+                title=f"{e('chip')} HWID Reset",
+                description=f"**User** {interaction.user.mention} (`{interaction.user.id}`)",
                 color=0xFEE75C,
-                webhook_key="wh_key_generated",
+                webhook_key="wh_hwid_resets",
             )
         else:
-            embed = discord.Embed(
-                title="HWID Reset Failed",
-                description=message,
+            await _reply_v2(
+                interaction,
+                f"{e('cross')} **HWID Reset Failed**\n\n{message}",
                 color=0xED4245,
             )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 # ─── SETUP PINGS VIEW ─────────────────────────────────────────────────────────
 
@@ -417,43 +519,37 @@ class SetupPingsView(discord.ui.View):
 
     @discord.ui.button(
         label="Setup Pings",
-        emoji="🔔",
         style=discord.ButtonStyle.secondary,
         custom_id="setup_pings_toggle",
     )
     async def toggle_setup_pings(self, interaction: discord.Interaction, button: discord.ui.Button):
         role_id = CONFIG["setup_pings_role_id"]
         if not role_id:
-            await interaction.response.send_message(
-                "Setup pings role is not configured. Contact staff.", ephemeral=True
-            )
+            await _reply_v2(interaction, f"{e('cross')} Setup pings role is not configured.", color=0xED4245)
             return
         role = interaction.guild.get_role(role_id)
         if not role:
-            await interaction.response.send_message(
-                "Setup pings role not found. Contact staff.", ephemeral=True
-            )
+            await _reply_v2(interaction, f"{e('cross')} Setup pings role not found.", color=0xED4245)
             return
         member = interaction.user
         if role in member.roles:
             await member.remove_roles(role, reason="Setup pings toggle")
-            await interaction.response.send_message(
-                f"Removed **{role.name}** - you will no longer receive setup pings.", ephemeral=True
+            await _reply_v2(
+                interaction,
+                f"{e('cross')} Removed **{role.name}** - you will no longer receive setup pings.",
+                color=0xFEE75C,
             )
         else:
             await member.add_roles(role, reason="Setup pings toggle")
-            await interaction.response.send_message(
-                f"Added **{role.name}** - you will be pinged when setup team is available.", ephemeral=True
+            await _reply_v2(
+                interaction,
+                f"{e('verify')} Added **{role.name}** - you will be pinged when setup team is available.",
+                color=0x57F287,
             )
-
 
 # ─── BOT ──────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-# Members and message_content are privileged intents.
-# Enable them in the Discord Developer Portal if you want full member cache
-# and message transcript content. The bot runs without them - role ops use
-# interaction.user directly, and transcripts fall back to message count only.
 intents.members = False
 intents.message_content = False
 
@@ -461,8 +557,9 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 SENTINEL = "/data/.customer_channels_done"
 
+
 async def _setup_customer_channels(guild: discord.Guild):
-    """Auto-create verify and hwid-reset channels if not done yet. Prints IDs for Railway env vars."""
+    """Auto-create verify and hwid-reset channels if not done yet."""
     if os.path.exists(SENTINEL):
         return
 
@@ -470,7 +567,6 @@ async def _setup_customer_channels(guild: discord.Guild):
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
 
-    # Find or create the category
     CATEGORY_NAME = "CUSTOMER BOT"
     category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
     if not category:
@@ -487,7 +583,6 @@ async def _setup_customer_channels(guild: discord.Guild):
     else:
         log.info(f"  Category '{CATEGORY_NAME}' already exists ({category.id})")
 
-    # Channels to create inside the category
     CHANNELS = [
         ("rules",      True),
         ("verify",     True),
@@ -515,78 +610,74 @@ async def _setup_customer_channels(guild: discord.Guild):
                 view_channel=True, send_messages=True,
                 manage_channels=True, manage_messages=True,
             )
-
         ch = await guild.create_text_channel(name=ch_name, category=category, overwrites=overwrites)
         created[ch_name] = ch
         log.info(f"  Created #{ch_name} ({ch.id})")
 
-    # Post verify panel
+    # -- Verify panel --
     verify_ch = created.get("verify")
     if verify_ch:
-        embed = discord.Embed(
-            title="Verification",
-            description=(
-                "To access this server, verify your license key.\n\n"
-                "Click **Verify** below and enter your license key when prompted.\n"
-                "Your key is linked to your Discord account permanently."
-            ),
-            color=0x2b2d31,
+        text = (
+            f"## {e('verify')} Verification\n\n"
+            "To access this server you need to verify your license key.\n\n"
+            f"{e('arrow')} Click **Verify** below and enter your license key when prompted.\n"
+            f"{e('key')} Your key is linked to your Discord account permanently.\n\n"
+            "-# One key per Discord account."
         )
-        embed.set_footer(text="One key per Discord account.")
-        await verify_ch.send(embed=embed, view=VerifyView())
+        await _send_v2(verify_ch, text, color=0x2b2d31, view=VerifyView())
 
-    # Post HWID panel
+    # -- HWID panel --
     hwid_ch = created.get("hwid-reset")
     if hwid_ch:
-        embed = discord.Embed(
-            title="HWID Reset",
-            description=(
-                "If you have changed hardware or reinstalled Windows, you can reset your HWID here.\n\n"
-                "Click **Reset HWID** below. You have a limited number of resets.\n"
-                "If you have used all resets, open a ticket in the key/HWID category."
-            ),
-            color=0x2b2d31,
+        text = (
+            f"## {e('chip')} HWID Reset\n\n"
+            "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
+            f"{e('arrow')} Click **Reset HWID** below.\n"
+            f"{e('warn')} You have a limited number of resets - use only when necessary.\n"
+            f"{e('ticket')} Used all resets? Open a ticket in the Key / HWID category.\n\n"
+            "-# HWID resets are logged and monitored."
         )
-        embed.set_footer(text="HWID resets are limited. Use only when necessary.")
-        await hwid_ch.send(embed=embed, view=HWIDView())
+        await _send_v2(hwid_ch, text, color=0x2b2d31, view=HWIDView())
 
-    # Post ticket panel
+    # -- Ticket panel --
     ticket_ch = created.get("tickets")
     if ticket_ch:
-        embed = discord.Embed(
-            title="Tickets",
-            description="Choose a category. A private channel opens and staff meet you there.",
-            color=0x2b2d31,
+        cats = "\n".join(
+            f"{e('dot')} **{cat['label']}** - {cat['desc']}"
+            for cat in TICKET_CATEGORIES.values()
         )
-        for cat_id, cat in TICKET_CATEGORIES.items():
-            embed.add_field(name=f"{cat['emoji']} {cat['label']}", value=cat["desc"], inline=False)
-        await ticket_ch.send(embed=embed, view=TicketPanelView())
+        text = (
+            f"## {e('ticket')} Open a Ticket\n\n"
+            "Choose a category below. A private channel opens and staff meet you there.\n\n"
+            f"{cats}"
+        )
+        await _send_v2(ticket_ch, text, color=0x2b2d31, view=TicketPanelView())
 
-    # Post rules
+    # -- Rules --
     rules_ch = created.get("rules")
     if rules_ch:
-        embed = discord.Embed(
-            title="Server Rules",
-            description=(
-                "By being in this server you agree to the following rules.\n"
-                "Violations may result in removal from the server or key termination."
-            ),
-            color=0x2b2d31,
-        )
         rules = [
-            ("1. Respect everyone", "Harassment, discrimination, and toxicity are not tolerated."),
-            ("2. No sharing keys", "License keys are non-transferable. Sharing a key will result in a permanent ban."),
-            ("3. No chargebacks", "Initiating a chargeback voids your license immediately with no refund."),
-            ("4. No leaking", "Do not share, leak, or redistribute any files or software from this server."),
-            ("5. No ban evasion", "Attempting to bypass a ban results in a permanent blacklist."),
-            ("6. Use correct channels", "Keep discussions in their respective channels."),
-            ("7. No advertising", "Advertising other products or services without permission is not allowed."),
-            ("8. Follow Discord ToS", "All Discord Terms of Service rules apply at all times."),
+            ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
+            ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
+            ("No chargebacks",      "Initiating a chargeback voids your license immediately with no refund."),
+            ("No leaking",          "Do not share, leak, or redistribute any files or software from this server."),
+            ("No ban evasion",      "Attempting to bypass a ban results in a permanent blacklist."),
+            ("Use correct channels","Keep discussions in their respective channels."),
+            ("No advertising",      "Advertising other products or services without permission is not allowed."),
+            ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
         ]
-        for name, value in rules:
-            embed.add_field(name=name, value=value, inline=False)
-        embed.set_footer(text="Last updated by staff")
-        await rules_ch.send(embed=embed)
+        rule_lines = "\n".join(
+            f"{e('dot')} **{name}** - {value}"
+            for name, value in rules
+        )
+        text = (
+            f"## {e('rules')} Server Rules\n\n"
+            "By being in this server you agree to the following rules.\n"
+            "Violations may result in removal or key termination.\n\n"
+            f"{rule_lines}\n\n"
+            "-# Last updated by staff"
+        )
+        await _send_v2(rules_ch, text, color=0x2b2d31)
 
     # Print IDs for Railway
     print("\n" + "=" * 60)
@@ -599,7 +690,6 @@ async def _setup_customer_channels(guild: discord.Guild):
     print(f"GUILD_ID={guild.id}")
     print("=" * 60 + "\n")
 
-    # Write sentinel so this doesn't re-run
     os.makedirs("/data", exist_ok=True)
     with open(SENTINEL, "w") as f:
         f.write("done")
@@ -632,217 +722,217 @@ async def on_ready():
 @bot.tree.command(name="setup-tickets", description="[Admin] Post the ticket panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_tickets(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Tickets",
-        description="Choose a category. A private channel opens and staff meet you there.",
-        color=0x2b2d31,
+    cats = "\n".join(
+        f"{e('dot')} **{cat['label']}** - {cat['desc']}"
+        for cat in TICKET_CATEGORIES.values()
     )
-    for cat_id, cat in TICKET_CATEGORIES.items():
-        embed.add_field(
-            name=f"{cat['emoji']} {cat['label']}",
-            value=cat["desc"],
-            inline=False,
-        )
-    await interaction.channel.send(embed=embed, view=TicketPanelView())
-    await interaction.response.send_message("Ticket panel posted.", ephemeral=True)
+    text = (
+        f"## {e('ticket')} Open a Ticket\n\n"
+        "Choose a category below. A private channel opens and staff meet you there.\n\n"
+        f"{cats}"
+    )
+    await interaction.channel.send(
+        components=[_container(text, 0x2b2d31)],
+        view=TicketPanelView(),
+    )
+    await _reply_v2(interaction, f"{e('verify')} Ticket panel posted.", color=0x57F287)
 
 
 @bot.tree.command(name="setup-verify", description="[Admin] Post the verification panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_verify(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Verification",
-        description=(
-            "To access this server, verify your license key.\n\n"
-            "Click **Verify** below and enter your license key when prompted.\n"
-            "Your key is linked to your Discord account permanently."
-        ),
-        color=0x2b2d31,
+    text = (
+        f"## {e('verify')} Verification\n\n"
+        "To access this server you need to verify your license key.\n\n"
+        f"{e('arrow')} Click **Verify** below and enter your license key when prompted.\n"
+        f"{e('key')} Your key is linked to your Discord account permanently.\n\n"
+        "-# One key per Discord account."
     )
-    embed.set_footer(text="One key per Discord account.")
-    await interaction.channel.send(embed=embed, view=VerifyView())
-    await interaction.response.send_message("Verification panel posted.", ephemeral=True)
+    await interaction.channel.send(
+        components=[_container(text, 0x2b2d31)],
+        view=VerifyView(),
+    )
+    await _reply_v2(interaction, f"{e('verify')} Verification panel posted.", color=0x57F287)
 
 
 @bot.tree.command(name="setup-hwid", description="[Admin] Post the HWID reset panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_hwid(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="HWID Reset",
-        description=(
-            "If you have changed hardware or reinstalled Windows, you can reset your HWID here.\n\n"
-            "Click **Reset HWID** below. You have a limited number of resets.\n"
-            "If you have used all resets, open a ticket in the key/HWID category."
-        ),
-        color=0x2b2d31,
+    text = (
+        f"## {e('chip')} HWID Reset\n\n"
+        "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
+        f"{e('arrow')} Click **Reset HWID** below.\n"
+        f"{e('warn')} You have a limited number of resets - use only when necessary.\n"
+        f"{e('ticket')} Used all resets? Open a ticket in the Key / HWID category.\n\n"
+        "-# HWID resets are logged and monitored."
     )
-    embed.set_footer(text="HWID resets are limited. Use only when necessary.")
-    await interaction.channel.send(embed=embed, view=HWIDView())
-    await interaction.response.send_message("HWID reset panel posted.", ephemeral=True)
+    await interaction.channel.send(
+        components=[_container(text, 0x2b2d31)],
+        view=HWIDView(),
+    )
+    await _reply_v2(interaction, f"{e('verify')} HWID panel posted.", color=0x57F287)
 
 
-@bot.tree.command(name="setup-rules", description="[Admin] Post the rules embed in the current channel.")
+@bot.tree.command(name="setup-rules", description="[Admin] Post the rules in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_rules(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Server Rules",
-        description=(
-            "By being in this server you agree to the following rules.\n"
-            "Violations may result in removal from the server or key termination."
-        ),
-        color=0x2b2d31,
-    )
     rules = [
-        ("1. Respect everyone", "Harassment, discrimination, and toxicity are not tolerated."),
-        ("2. No sharing keys", "License keys are non-transferable. Sharing a key will result in a permanent ban."),
-        ("3. No chargebacks", "Initiating a chargeback voids your license immediately with no refund."),
-        ("4. No leaking", "Do not share, leak, or redistribute any files or software from this server."),
-        ("5. No ban evasion", "Attempting to bypass a ban results in a permanent blacklist."),
-        ("6. Use correct channels", "Keep discussions in their respective channels. Keep #general clean."),
-        ("7. No advertising", "Advertising other products or services without permission is not allowed."),
-        ("8. Follow Discord ToS", "All Discord Terms of Service rules apply at all times."),
+        ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
+        ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
+        ("No chargebacks",      "Initiating a chargeback voids your license immediately with no refund."),
+        ("No leaking",          "Do not share, leak, or redistribute any files or software from this server."),
+        ("No ban evasion",      "Attempting to bypass a ban results in a permanent blacklist."),
+        ("Use correct channels","Keep discussions in their respective channels."),
+        ("No advertising",      "Advertising other products or services without permission is not allowed."),
+        ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
     ]
-    for name, value in rules:
-        embed.add_field(name=name, value=value, inline=False)
-    embed.set_footer(text="Last updated by staff")
-    await interaction.channel.send(embed=embed)
-    await interaction.response.send_message("Rules posted.", ephemeral=True)
+    rule_lines = "\n".join(
+        f"{e('dot')} **{name}** - {value}"
+        for name, value in rules
+    )
+    text = (
+        f"## {e('rules')} Server Rules\n\n"
+        "By being in this server you agree to the following rules.\n"
+        "Violations may result in removal or key termination.\n\n"
+        f"{rule_lines}\n\n"
+        "-# Last updated by staff"
+    )
+    await interaction.channel.send(components=[_container(text, 0x2b2d31)])
+    await _reply_v2(interaction, f"{e('verify')} Rules posted.", color=0x57F287)
 
 
-@bot.tree.command(name="setup-info", description="[Admin] Post the setup instructions embed in the current channel.")
+@bot.tree.command(name="setup-info", description="[Admin] Post the setup instructions in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_info_cmd(interaction: discord.Interaction):
     guild = interaction.guild
 
-    # Resolve ticket channel mention
     ticket_ch = guild.get_channel(CONFIG["ticket_channel_id"])
     ticket_ref = ticket_ch.mention if ticket_ch else "#open-a-ticket"
 
-    # Resolve setup alerts channel mention
-    alerts_ch_id = CONFIG["setup_alerts_channel_id"]
-    alerts_ch = guild.get_channel(alerts_ch_id) if alerts_ch_id else None
+    alerts_ch = guild.get_channel(CONFIG["setup_alerts_channel_id"]) if CONFIG["setup_alerts_channel_id"] else None
     alerts_ref = alerts_ch.mention if alerts_ch else "#setup-alerts"
 
-    embed = discord.Embed(
-        title="Awaiting Setup?",
-        description="Complete every step below, then wait for the Setup Team.",
-        color=0x2b2d31,
+    text = (
+        f"## {e('warn')} Awaiting Setup?\n\n"
+        "Complete every step below, then wait for the Setup Team.\n\n"
+        f"{e('dot')} **Get Setup Pings** - Click the button below to receive setup pings (click again to remove).\n\n"
+        f"{e('dot')} **Open a Setup Ticket** - Open a setup ticket in {ticket_ref}. Your Invoice ID is in your DMs with this bot.\n\n"
+        f"{e('dot')} **Wait for the Setup Team** - Check {alerts_ref} regularly. When a team member is available, ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
+        f"{e('warn')} Do **NOT** ping staff unless they have announced they are available for setups.\n\n"
+        "-# Failing to follow these steps may delay your setup."
     )
-    embed.add_field(
-        name="🔔 GET SETUP PINGS ROLE",
-        value="Click the button below to get the Setup Pings role (click again to remove it).",
-        inline=False,
+    await interaction.channel.send(
+        components=[_container(text, 0x2b2d31)],
+        view=SetupPingsView(),
     )
-    embed.add_field(
-        name="📋 OPEN A SETUP TICKET",
-        value=(
-            f"Open a setup ticket here: {ticket_ref}\n"
-            "Your Invoice ID is in your DMs with this bot."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="⏰ WAIT FOR SETUP TEAM",
-        value=(
-            f"Check {alerts_ref} regularly.\n"
-            "When a setup team member is available, ping them in your ticket **once** "
-            "with your **AnyDesk code & invoice ID**."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="⚠️ IMPORTANT",
-        value="Do **NOT** ping staff unless they have announced they are available for setups.",
-        inline=False,
-    )
-
-    await interaction.channel.send(embed=embed, view=SetupPingsView())
-    await interaction.response.send_message("Setup info posted.", ephemeral=True)
+    await _reply_v2(interaction, f"{e('verify')} Setup info posted.", color=0x57F287)
 
 
 @bot.tree.command(name="key", description="Check your license key status.")
 async def key_cmd(interaction: discord.Interaction):
     row = lookup_user(str(interaction.user.id))
     if not row:
-        await interaction.response.send_message(
-            "No key is linked to your account. Use `/verify` or the verification panel to link your key.",
-            ephemeral=True,
+        await _reply_v2(
+            interaction,
+            (
+                f"{e('cross')} **No key linked.**\n\n"
+                "Use `/verify` or the verification panel to link your license key."
+            ),
+            color=0xED4245,
         )
         return
+
     expires = row["expires_at"] or "Never"
     hwid_used = row["hwid"] is not None
     max_resets = CONFIG.get("max_hwid_resets", 1)
     resets_left = max(0, int(max_resets) - int(row["hwid_resets"]))
-    embed = discord.Embed(title="Your License", color=0x2b2d31)
-    embed.add_field(name="Key", value=f"`{row['key']}`", inline=False)
-    embed.add_field(name="Product", value=row["product"] or "default", inline=True)
-    embed.add_field(name="Status", value=row["status"].capitalize(), inline=True)
-    embed.add_field(name="Expires", value=expires, inline=True)
-    embed.add_field(name="HWID Bound", value="Yes" if hwid_used else "No", inline=True)
-    embed.add_field(name="HWID Resets Left", value=str(resets_left), inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    text = (
+        f"## {e('key')} Your License\n\n"
+        f"**Key** `{row['key']}`\n"
+        f"**Product** {row['product'] or 'default'}\n"
+        f"**Status** {row['status'].capitalize()}\n"
+        f"**Expires** {expires}\n\n"
+        f"{e('chip')} **HWID Bound** {'Yes' if hwid_used else 'No'}\n"
+        f"{e('dot')} **Resets Remaining** {resets_left}"
+    )
+    await _reply_v2(interaction, text, color=0x2b2d31)
 
 
 @bot.tree.command(name="hwid-reset", description="Reset your HWID (limited uses).")
 async def hwid_reset_cmd(interaction: discord.Interaction):
     success, message = reset_hwid(str(interaction.user.id))
     if success:
-        embed = discord.Embed(
-            title="HWID Reset Successful",
-            description=message,
+        await _reply_v2(
+            interaction,
+            f"{e('chip')} **HWID Reset Successful**\n\n{message}",
             color=0x57F287,
         )
         await send_log(
-            title="HWID Reset",
-            description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)",
+            title=f"{e('chip')} HWID Reset",
+            description=f"**User** {interaction.user.mention} (`{interaction.user.id}`)",
             color=0xFEE75C,
-            webhook_key="wh_key_generated",
+            webhook_key="wh_hwid_resets",
         )
     else:
-        embed = discord.Embed(
-            title="HWID Reset Failed",
-            description=message,
+        await _reply_v2(
+            interaction,
+            f"{e('cross')} **HWID Reset Failed**\n\n{message}",
             color=0xED4245,
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="verify", description="Link your license key to your Discord account.")
 async def verify_cmd(interaction: discord.Interaction):
     verified_role = interaction.guild.get_role(CONFIG["verified_role_id"])
     if verified_role and verified_role in interaction.user.roles:
-        await interaction.response.send_message("You are already verified!", ephemeral=True)
+        await _reply_v2(
+            interaction,
+            f"{e('verify')} You are already verified.",
+            color=0x57F287,
+        )
         return
     await interaction.response.send_modal(VerifyModal())
 
 
-# Admin commands
 @bot.tree.command(name="lookup", description="[Admin] Look up a user's key by Discord ID.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def lookup_cmd(interaction: discord.Interaction, user: discord.Member):
     row = lookup_user(str(user.id))
     if not row:
-        await interaction.response.send_message(f"No key linked to {user.mention}.", ephemeral=True)
+        await _reply_v2(
+            interaction,
+            f"{e('cross')} No key linked to {user.mention}.",
+            color=0xED4245,
+        )
         return
+
     expires = row["expires_at"] or "Never"
-    embed = discord.Embed(title=f"Key Lookup: {user}", color=0x5865F2)
-    embed.add_field(name="Key", value=f"`{row['key']}`", inline=False)
-    embed.add_field(name="Product", value=row["product"] or "default", inline=True)
-    embed.add_field(name="Status", value=row["status"].capitalize(), inline=True)
-    embed.add_field(name="Expires", value=expires, inline=True)
-    embed.add_field(name="HWID", value=f"`{row['hwid']}`" if row["hwid"] else "Not bound", inline=False)
-    embed.add_field(name="HWID Resets", value=str(row["hwid_resets"]), inline=True)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    hwid_val = f"`{row['hwid']}`" if row["hwid"] else "Not bound"
+
+    text = (
+        f"## {e('shield')} Key Lookup: {user}\n\n"
+        f"**Key** `{row['key']}`\n"
+        f"**Product** {row['product'] or 'default'}\n"
+        f"**Status** {row['status'].capitalize()}\n"
+        f"**Expires** {expires}\n\n"
+        f"{e('chip')} **HWID** {hwid_val}\n"
+        f"{e('dot')} **HWID Resets Used** {row['hwid_resets']}"
+    )
+    await _reply_v2(interaction, text, color=0x5865F2)
 
 
 @bot.tree.command(name="close", description="[Admin] Force-close a ticket channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def close_cmd(interaction: discord.Interaction):
     if not interaction.channel.name.startswith("ticket-"):
-        await interaction.response.send_message("This is not a ticket channel.", ephemeral=True)
+        await _reply_v2(
+            interaction,
+            f"{e('cross')} This is not a ticket channel.",
+            color=0xED4245,
+        )
         return
     await close_ticket(interaction)
-
 
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 

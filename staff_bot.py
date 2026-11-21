@@ -212,6 +212,7 @@ class StaffBot(discord.Client):
                 "ticket-transcripts","ticket-notes","key-generated","bans","automod"
             ]},
             {"name": "CUSTOMER BOT LOGS", "key": "CUSTOMER", "channels": [
+                "verifications","hwid-resets",
                 "tickets-opened","tickets-closed","ticket-transcripts",
                 "ticket-notes","key-generated","bans","automod"
             ]},
