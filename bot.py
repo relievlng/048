@@ -1716,11 +1716,35 @@ def start_api(port: int):
 
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
-@app_commands.command(name="testlogin", description="[ADMIN] Simulate a loader login event for a registered user.")
-@app_commands.describe(user="Target user to simulate login for", fake_ip="Fake IP to use (default: 127.0.0.1)")
+@app_commands.command(name="test", description="[ADMIN] Simulate any loader event and show full user state.")
+@app_commands.describe(
+    event="LOGIN, HWID_MISMATCH, HWID_BANNED, IP_BANNED, STATUS_BLOCKED, DESTRUCT, INJECT_FAIL, CRASH, CHEAT_START, CHEAT_STOP",
+    user="Target user",
+    fake_ip="IP to simulate (default: 127.0.0.1)",
+    fake_hwid="Raw HWID string to use (default: bound HWID or test value)",
+    detail="Extra detail string for macro events"
+)
 @admin_only()
-async def cmd_testlogin(i: discord.Interaction, user: discord.Member, fake_ip: Optional[str] = "127.0.0.1"):
+async def cmd_test(i: discord.Interaction,
+                   event: str,
+                   user: discord.Member,
+                   fake_ip: Optional[str] = "127.0.0.1",
+                   fake_hwid: Optional[str] = None,
+                   detail: Optional[str] = None):
     await i.response.defer(ephemeral=True)
+
+    VALID_EVENTS = {
+        "LOGIN", "HWID_MISMATCH", "HWID_BANNED", "IP_BANNED", "STATUS_BLOCKED",
+        "DESTRUCT", "INJECT_FAIL", "CRASH", "CHEAT_START", "CHEAT_STOP"
+    }
+    event = event.upper().strip()
+    if event not in VALID_EVENTS:
+        opts = ", ".join(f"`{v}`" for v in sorted(VALID_EVENTS))
+        e = discord.Embed(title="Invalid Event", color=discord.Color.red(),
+            description=f"Choose one of:\n{opts}")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
     did = str(user.id)
     row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
     if not row:
@@ -1730,29 +1754,107 @@ async def cmd_testlogin(i: discord.Interaction, user: discord.Member, fake_ip: O
         return
 
     ip = fake_ip or "127.0.0.1"
-    hwid_hash = row["hwid"] or hash_hwid("TEST_HWID_" + did)
+    real_hwid_hash = row["hwid"] or hash_hwid("TEST_HWID_" + did)
+    test_hwid_hash = hash_hwid(fake_hwid) if fake_hwid else real_hwid_hash
+    fired: list[str] = []
 
-    # Write a real login_log entry so session/fail counts are accurate
-    DB.execute(
-        "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
-        (did, hwid_hash, ip, now_iso(), row["product"], "ok")
-    )
-    # Update last_seen and ip_last just like a real verify
-    DB.execute("UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?",
-               (now_iso(), ip, did))
-    DB.commit()
-    audit("TEST_LOGIN", actor_id=str(i.user.id), target_id=did, detail=f"ip={ip}")
+    # ── Fire the correct log and write DB records ──────────────────────────────
+    if event == "LOGIN":
+        DB.execute(
+            "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+            (did, real_hwid_hash, ip, now_iso(), row["product"], "ok")
+        )
+        DB.execute("UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?", (now_iso(), ip, did))
+        DB.commit()
+        await _send_login_log(did, ip, real_hwid_hash, row["product"], row["expires_at"])
+        fired.append("Login log posted")
+        fired.append("login_log entry written")
+        fired.append("last_seen + ip_last updated")
 
-    # Fire the full rich loader log
-    await _send_login_log(did, ip, hwid_hash, row["product"], row["expires_at"])
+    elif event == "HWID_MISMATCH":
+        mismatch_hash = hash_hwid(fake_hwid or ("MISMATCH_TEST_" + did))
+        DB.execute(
+            "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+            (did, mismatch_hash, ip, now_iso(), row["product"], "hwid_mismatch")
+        )
+        DB.commit()
+        await _send_hwid_mismatch_log(did, ip, real_hwid_hash, mismatch_hash, row["product"])
+        fired.append("HWID mismatch log posted")
+        fired.append("Stored hash vs attempt hash shown in log channel")
 
-    e = discord.Embed(title="Test Login Fired", color=discord.Color.blurple())
-    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
-    e.add_field(name="Product", value=f"`{row['product']}`", inline=True)
-    e.add_field(name="Fake IP", value=f"`{ip}`", inline=True)
-    e.add_field(name="HWID Hash", value=f"`{hwid_hash[:16]}...`", inline=True)
-    e.set_footer(text="Login log entry written - check your loader log channel.")
-    await i.followup.send(embed=e, ephemeral=True)
+    elif event == "HWID_BANNED":
+        await _send_hwid_banned_log(did, ip, test_hwid_hash)
+        fired.append("HWID banned log posted (no DB change)")
+
+    elif event == "IP_BANNED":
+        await _send_ip_banned_log(did, ip)
+        fired.append("IP banned log posted (no DB change)")
+
+    elif event == "STATUS_BLOCKED":
+        status = row["status"]
+        await _send_status_blocked_log(did, ip, real_hwid_hash, status, row["product"])
+        fired.append(f"Status blocked log posted (status={status})")
+
+    else:
+        # Macro events: DESTRUCT, INJECT_FAIL, CRASH, CHEAT_START, CHEAT_STOP
+        macro_detail = detail or f"Simulated by {i.user}"
+        await _send_macro_event_log(event, did, ip, row["product"], macro_detail)
+        fired.append(f"{event} macro event log posted")
+
+    audit(f"TEST_{event}", actor_id=str(i.user.id), target_id=did, detail=f"ip={ip}")
+
+    # ── Re-fetch user row (may have changed) and build full state summary ──────
+    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
+    s = effective_status(row)
+
+    total_ok  = DB.execute("SELECT COUNT(*) FROM login_log WHERE discord_id=? AND status='ok'", (did,)).fetchone()[0]
+    total_all = DB.execute("SELECT COUNT(*) FROM login_log WHERE discord_id=?", (did,)).fetchone()[0]
+    failed    = total_all - total_ok
+    recent_logs = DB.execute(
+        "SELECT status, ip, timestamp FROM login_log WHERE discord_id=? ORDER BY id DESC LIMIT 5", (did,)
+    ).fetchall()
+
+    hwid_banned = bool(DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (real_hwid_hash,)).fetchone())
+    ip_banned   = bool(DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (f"IP:{ip}",)).fetchone())
+
+    # ── Embed 1: Test result ───────────────────────────────────────────────────
+    e1 = discord.Embed(title=f"Test: {event}", color=discord.Color.blurple())
+    e1.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e1.add_field(name="Simulated IP", value=f"`{ip}`", inline=True)
+    e1.add_field(name="HWID Hash", value=f"`{real_hwid_hash[:16]}...`", inline=True)
+    e1.add_field(name="Actions", value="\n".join(f"- {f}" for f in fired), inline=False)
+    e1.set_footer(text="Check your loader log channel for the fired embed.")
+
+    # ── Embed 2: Live user state ───────────────────────────────────────────────
+    prod_icon = "🌐" if row["product"] == "public" else "🔒"
+    fac_status = "✅ Authorized" if row["fac_reset_auth"] else "❌ Not Authorized"
+    e2 = discord.Embed(title="Live User State", color=status_color(s))
+    e2.add_field(name="Status", value=f"{status_emoji(s)} {s.upper()}", inline=True)
+    e2.add_field(name="Product", value=f"{prod_icon} {row['product']}", inline=True)
+    e2.add_field(name="Expires", value=fmt_dt(row["expires_at"]), inline=True)
+    e2.add_field(name="Last Seen", value=fmt_ts(row["last_seen"]), inline=True)
+    e2.add_field(name="Last IP", value=f"`{row['ip_last']}`" if row["ip_last"] else "N/A", inline=True)
+    e2.add_field(name="FAC Auth", value=fac_status, inline=True)
+    e2.add_field(name="Sessions (ok)", value=str(total_ok), inline=True)
+    e2.add_field(name="Failed Attempts", value=str(failed), inline=True)
+    e2.add_field(name="HWID Banned", value="Yes" if hwid_banned else "No", inline=True)
+    e2.add_field(name="IP Banned", value="Yes" if ip_banned else "No", inline=True)
+    if row["ban_reason"]:
+        e2.add_field(name="Ban Reason", value=row["ban_reason"], inline=False)
+
+    # ── Embed 3: Last 5 login_log entries ─────────────────────────────────────
+    if recent_logs:
+        log_lines = []
+        for r in recent_logs:
+            ts = r["timestamp"][:16].replace("T", " ")
+            log_lines.append(f"[{ts}] {r['status']:20s} {r['ip']}")
+        e3 = discord.Embed(title="Recent Login Log (last 5)", color=discord.Color.dark_gray(),
+            description="```\n" + "\n".join(log_lines) + "\n```")
+    else:
+        e3 = discord.Embed(title="Recent Login Log", color=discord.Color.dark_gray(),
+            description="No entries yet.")
+
+    await i.followup.send(embeds=[e1, e2, e3], ephemeral=True)
 
 
 ALL_COMMANDS = [
@@ -1764,7 +1866,7 @@ ALL_COMMANDS = [
     cmd_listusers, cmd_listkeys, cmd_deletekey,
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
-    cmd_testlogin,
+    cmd_test,
 ]
 
 async def main():
