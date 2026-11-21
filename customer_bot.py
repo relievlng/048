@@ -40,6 +40,7 @@ CONFIG = {
     "ticket_category_id":     env_int("TICKET_CATEGORY_ID"),
     "rules_channel_id":       env_int("RULES_CHANNEL_ID"),
     "verify_channel_id":      env_int("VERIFY_CHANNEL_ID"),
+    "hwid_channel_id":        env_int("HWID_CHANNEL_ID"),
     "ticket_channel_id":      env_int("TICKET_CHANNEL_ID"),
     # Per-channel webhook URLs (from staff bot's auto-setup output)
     "wh_tickets_opened":      env("WEBHOOK_CUSTOMER_TICKETS_OPENED"),
@@ -378,6 +379,36 @@ class VerifyView(discord.ui.View):
             return
         await interaction.response.send_modal(VerifyModal())
 
+# ─── HWID RESET VIEW ──────────────────────────────────────────────────────────
+
+class HWIDView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Reset HWID", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="hwid_reset_button")
+    async def hwid_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, message = reset_hwid(str(interaction.user.id))
+        if success:
+            embed = discord.Embed(
+                title="HWID Reset Successful",
+                description=message,
+                color=0x57F287,
+            )
+            await send_log(
+                title="HWID Reset",
+                description=f"**User:** {interaction.user.mention} (`{interaction.user.id}`)",
+                color=0xFEE75C,
+                webhook_key="wh_key_generated",
+            )
+        else:
+            embed = discord.Embed(
+                title="HWID Reset Failed",
+                description=message,
+                color=0xED4245,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 # ─── SETUP PINGS VIEW ─────────────────────────────────────────────────────────
 
 class SetupPingsView(discord.ui.View):
@@ -434,6 +465,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
+    bot.add_view(HWIDView())
     bot.add_view(SetupPingsView())
     try:
         synced = await bot.tree.sync()
@@ -476,6 +508,23 @@ async def setup_verify(interaction: discord.Interaction):
     embed.set_footer(text="One key per Discord account.")
     await interaction.channel.send(embed=embed, view=VerifyView())
     await interaction.response.send_message("Verification panel posted.", ephemeral=True)
+
+
+@bot.tree.command(name="setup-hwid", description="[Admin] Post the HWID reset panel in the current channel.")
+@app_commands.checks.has_role(CONFIG["admin_role_id"])
+async def setup_hwid(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="HWID Reset",
+        description=(
+            "If you have changed hardware or reinstalled Windows, you can reset your HWID here.\n\n"
+            "Click **Reset HWID** below. You have a limited number of resets.\n"
+            "If you have used all resets, open a ticket in the key/HWID category."
+        ),
+        color=0x2b2d31,
+    )
+    embed.set_footer(text="HWID resets are limited. Use only when necessary.")
+    await interaction.channel.send(embed=embed, view=HWIDView())
+    await interaction.response.send_message("HWID reset panel posted.", ephemeral=True)
 
 
 @bot.tree.command(name="setup-rules", description="[Admin] Post the rules embed in the current channel.")
