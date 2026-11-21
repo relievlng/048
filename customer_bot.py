@@ -269,12 +269,16 @@ async def close_ticket(interaction: discord.Interaction):
 
     await interaction.response.send_message("Closing ticket in 5 seconds...")
 
-    # Build transcript
+    # Build transcript (message content requires the privileged message_content
+    # intent - if not enabled, content will be empty; we log what we can)
     messages = []
+    msg_count = 0
     async for msg in channel.history(limit=200, oldest_first=True):
         if not msg.author.bot:
-            messages.append(f"[{msg.created_at.strftime('%H:%M')}] {msg.author}: {msg.content}")
-    transcript = "\n".join(messages) if messages else "No messages."
+            msg_count += 1
+            content = msg.content or "[no content - enable Message Content Intent]"
+            messages.append(f"[{msg.created_at.strftime('%H:%M')}] {msg.author}: {content}")
+    transcript = "\n".join(messages) if messages else f"No messages recorded ({msg_count} total)."
 
     await send_log(
         title="Ticket Closed",
@@ -395,8 +399,12 @@ class SetupPingsView(discord.ui.View):
 # ─── BOT ──────────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
+# Members and message_content are privileged intents.
+# Enable them in the Discord Developer Portal if you want full member cache
+# and message transcript content. The bot runs without them - role ops use
+# interaction.user directly, and transcripts fall back to message count only.
+intents.members = False
+intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
