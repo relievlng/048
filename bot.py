@@ -708,6 +708,17 @@ async def cmd_lookup(i: discord.Interaction, query: str):
         roles_str = "N/A"
         avatar_url = None
 
+    # Open ticket (from staff bot's shared tickets table, if it exists)
+    open_ticket: sqlite3.Row | None = None
+    try:
+        open_ticket = DB.execute(
+            "SELECT id, type, status, payment_status, opened_at, assigned_to FROM tickets "
+            "WHERE discord_id=? AND status IN ('open','claimed') ORDER BY id DESC LIMIT 1",
+            (did,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        pass  # tickets table not yet created (staff bot not deployed yet)
+
     prod_icon = PRODUCT_ICONS.get(row["product"], "🔑")
     has_alts = bool(alts or hwid_alts)
 
@@ -716,6 +727,7 @@ async def cmd_lookup(i: discord.Interaction, query: str):
     if has_alts:        flags.append(f"⚠️ {len(alts)} IP-shared / {len(hwid_alts)} HWID-shared account(s) detected")
     if failed > 5:      flags.append(f"⚠️ {failed} failed login attempt(s)")
     if len(ip_list) > 3: flags.append(f"⚠️ {len(ip_list)} unique IPs on record")
+    if open_ticket:     flags.append(f"🎫 Open ticket #{open_ticket['id']} ({open_ticket['type'].replace('_', ' ')})")
     desc = disc_str + ("\n\n" + "\n".join(flags) if flags else "")
 
     e = discord.Embed(title="User Lookup", description=desc, color=status_color(s))
@@ -748,6 +760,15 @@ async def cmd_lookup(i: discord.Interaction, query: str):
     # Known IPs (always show, helps spot multi-IP patterns)
     ip_str = "  ".join(f"`{ip_addr}`" for ip_addr in ip_list[:12]) if ip_list else "None on record"
     e.add_field(name=f"Known IPs ({len(ip_list)})", value=ip_str, inline=False)
+
+    # Open ticket from staff bot (if any)
+    if open_ticket:
+        t_type = open_ticket["type"].replace("_", " ").title()
+        t_pay  = open_ticket["payment_status"].replace("_", " ")
+        t_date = open_ticket["opened_at"][:10]
+        t_who  = f"<@{open_ticket['assigned_to']}>" if open_ticket["assigned_to"] else "Unassigned"
+        t_val  = f"#{open_ticket['id']} - {t_type}\nStatus: **{open_ticket['status']}** | Payment: {t_pay}\nOpened: {t_date} | {t_who}"
+        e.add_field(name="🎫 Open Ticket", value=t_val, inline=False)
 
     # Alt accounts (only if present)
     if alts:
