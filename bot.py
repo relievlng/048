@@ -83,12 +83,16 @@ def init_db(path: str) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS key_pool (
             key         TEXT PRIMARY KEY,
             product     TEXT NOT NULL DEFAULT 'default',
+            visibility  TEXT NOT NULL DEFAULT 'private',
             created_at  TEXT NOT NULL,
             expires_at  TEXT,
             claimed     INTEGER NOT NULL DEFAULT 0,
             created_by  TEXT,
             notes       TEXT
         );
+        -- migration: add visibility to existing DBs
+        CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY);
+
         CREATE TABLE IF NOT EXISTS hwid_bans (
             hwid        TEXT PRIMARY KEY,
             reason      TEXT,
@@ -106,6 +110,13 @@ def init_db(path: str) -> sqlite3.Connection:
         );
     """)
     conn.commit()
+    # Live migration - add visibility column to existing deployments
+    try:
+        conn.execute("ALTER TABLE key_pool ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+        conn.commit()
+        log.info("Migration: added key_pool.visibility column")
+    except Exception:
+        pass  # column already exists
     log.info("Database ready: %s", path)
     return conn
 
@@ -505,29 +516,71 @@ async def cmd_resetmyhwid(i: discord.Interaction, new_hwid: str):
 
 # ─── ADMIN COMMANDS ───────────────────────────────────────────────────────────
 
+async def autocomplete_duration(i: discord.Interaction, current: str):
+    options = ["1day", "3days", "1week", "2weeks", "1month", "3months", "6months", "1year", "lifetime"]
+    return [
+        app_commands.Choice(name=o, value=o)
+        for o in options if current.lower() in o
+    ]
+
+async def autocomplete_visibility(i: discord.Interaction, current: str):
+    return [
+        app_commands.Choice(name="🔒 private - admin-issued keys only", value="private"),
+        app_commands.Choice(name="🌐 public - anyone can register", value="public"),
+    ]
+
+DURATION_PRESETS = {
+    "1day":    timedelta(days=1),
+    "3days":   timedelta(days=3),
+    "1week":   timedelta(weeks=1),
+    "2weeks":  timedelta(weeks=2),
+    "1month":  timedelta(days=30),
+    "3months": timedelta(days=90),
+    "6months": timedelta(days=180),
+    "1year":   timedelta(days=365),
+    "lifetime": None,
+}
+
 @app_commands.command(name="keygen", description="[ADMIN] Generate keys and optionally DM one to a user.")
 @app_commands.describe(
     count="Number of keys to generate (1-100)",
     product="Product name/tier",
-    expires="Expiry date YYYY-MM-DD (blank = never)",
+    visibility="private (admin-issued) or public (open registration)",
+    duration="How long the key is valid for",
     deliver_to="DM a key directly to this user (only works when count=1)",
     notes="Admin notes attached to these keys"
 )
+@app_commands.autocomplete(duration=autocomplete_duration, visibility=autocomplete_visibility)
 @admin_only()
 async def cmd_keygen(i: discord.Interaction,
                      count: app_commands.Range[int, 1, 100] = 1,
                      product: str = "default",
-                     expires: Optional[str] = None,
+                     visibility: Optional[str] = "private",
+                     duration: Optional[str] = "lifetime",
                      deliver_to: Optional[discord.Member] = None,
                      notes: Optional[str] = None):
     await i.response.defer(ephemeral=True)
+
+    vis = (visibility or "private").lower()
+    if vis not in ("private", "public"):
+        view = SimpleView(discord.Color.red(), "**Bad Visibility**", "Use `private` or `public`.")
+        await i.followup.send(**cv2_send(view), ephemeral=True)
+        return
+
+    dur_key = (duration or "lifetime").lower().replace(" ", "")
+    if dur_key not in DURATION_PRESETS:
+        opts = ", ".join(f"`{k}`" for k in DURATION_PRESETS)
+        view = SimpleView(discord.Color.red(), "**Bad Duration**", f"Choose one: {opts}")
+        await i.followup.send(**cv2_send(view), ephemeral=True)
+        return
+
+    delta = DURATION_PRESETS[dur_key]
     exp_iso = None
-    if expires:
-        exp_iso = parse_date(expires)
-        if not exp_iso:
-            view = SimpleView(discord.Color.red(), "**Bad Date**", "Use format: `YYYY-MM-DD`")
-            await i.followup.send(**cv2_send(view), ephemeral=True)
-            return
+    expires_label = "Lifetime"
+    if delta is not None:
+        exp_dt = datetime.now(timezone.utc) + delta
+        exp_iso = exp_dt.isoformat()
+        expires_label = exp_dt.strftime("%Y-%m-%d")
 
     if deliver_to and count > 1:
         view = SimpleView(discord.Color.red(), "**Invalid**", "`deliver_to` only works when `count` is 1.")
@@ -538,12 +591,12 @@ async def cmd_keygen(i: discord.Interaction,
     for _ in range(count):
         k = gen_key(CONFIG["key_prefix"])
         DB.execute(
-            "INSERT OR IGNORE INTO key_pool (key,product,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?)",
-            (k, product, now_iso(), exp_iso, str(i.user.id), notes)
+            "INSERT OR IGNORE INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?,?)",
+            (k, product, vis, now_iso(), exp_iso, str(i.user.id), notes)
         )
         keys.append(k)
     DB.commit()
-    audit("KEYGEN", actor_id=str(i.user.id), detail=f"{count}x product={product} expires={expires or 'never'}")
+    audit("KEYGEN", actor_id=str(i.user.id), detail=f"{count}x product={product} vis={vis} duration={dur_key}")
 
     # DM delivery
     dm_status = None
@@ -555,7 +608,7 @@ async def cmd_keygen(i: discord.Interaction,
             [
                 ("Key", f"```{key_to_send}```"),
                 ("Product", product),
-                ("Expires", expires or "Never"),
+                ("Duration", expires_label),
                 ("How to activate", "Use `/register <key> <hwid>` in the server to activate your license."),
             ],
             footer="Keep this key private - do not share it."
@@ -578,7 +631,8 @@ async def cmd_keygen(i: discord.Interaction,
     )
     c = view.children[0]
     c.add_item(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
-    meta = f"**Product:** `{product}` - **Expires:** `{expires or 'Never'}`"
+    vis_emoji = "🔒" if vis == "private" else "🌐"
+    meta = f"**Product:** `{product}` - **Visibility:** {vis_emoji} `{vis}` - **Duration:** `{expires_label}`"
     if dm_status:
         meta += f"\n**Delivery:** {dm_status}"
     meta += f"\n-# Generated by {i.user}"
@@ -896,7 +950,10 @@ async def cmd_listkeys(i: discord.Interaction,
     if not rows:
         await i.followup.send(**cv2_send(SimpleView(discord.Color.orange(), "**No Unclaimed Keys**")), ephemeral=True)
         return
-    lines = [f"{r['key']} - {r['product']} - {fmt_dt(r['expires_at'])}" for r in rows]
+    lines = []
+    for r in rows:
+        vis_icon = "🌐" if r["visibility"] == "public" else "🔒"
+        lines.append(f"{vis_icon} {r['key']} - {r['product']} - {fmt_dt(r['expires_at'])}")
     view = KeyListView(f"Unclaimed Keys ({len(rows)})", lines)
     await i.followup.send(**cv2_send(view), ephemeral=True)
 
