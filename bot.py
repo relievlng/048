@@ -738,10 +738,11 @@ async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional
     if kicked:      actions.append("Kicked from server")
 
     e = discord.Embed(title="User Banned", color=discord.Color.red())
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
     e.add_field(name="Reason", value=ban_reason, inline=False)
     e.add_field(name="Actions Taken", value="\n".join(f"- {a}" for a in actions), inline=False)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="Banned By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
     await BOT.log_embed(e)
 
@@ -770,8 +771,9 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
         pass
     audit("UNBAN", actor_id=str(i.user.id), target_id=did)
     e = discord.Embed(title="User Unbanned", color=discord.Color.green())
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="Unbanned By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
     await BOT.log_embed(e)
 
@@ -797,9 +799,10 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
         pass
     audit("REVOKE", actor_id=str(i.user.id), target_id=did, detail=reason)
     e = discord.Embed(title="License Revoked", color=discord.Color.dark_gray())
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
-    e.add_field(name="Reason", value=reason or "None", inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="Reason", value=reason or "No reason given", inline=True)
+    e.add_field(name="Revoked By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
     await BOT.log_embed(e)
 
@@ -822,8 +825,10 @@ async def cmd_addnote(i: discord.Interaction, user: discord.Member, note: str):
     DB.commit()
     audit("ADD_NOTE", actor_id=str(i.user.id), target_id=did, detail=note[:100])
     e = discord.Embed(title="Note Added", color=discord.Color.blurple())
-    e.add_field(name="User", value=f"<@{did}>", inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
     e.add_field(name="Note", value=f"```{note[:200]}```", inline=False)
+    e.add_field(name="Added By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -842,54 +847,56 @@ async def cmd_resethwid(i: discord.Interaction, user: discord.Member, new_hwid: 
     DB.execute("UPDATE users SET hwid=?, hwid_resets=hwid_resets+1 WHERE discord_id=?", (hashed, did))
     DB.commit()
     audit("HWID_RESET_ADMIN", actor_id=str(i.user.id), target_id=did, detail="set" if hashed else "cleared")
-    action = "updated" if hashed else "cleared"
-    e = discord.Embed(title=f"HWID {action.title()}", color=discord.Color.orange())
-    e.add_field(name="User", value=f"<@{did}>", inline=True)
-    e.add_field(name="Status", value=action.title(), inline=True)
+    action = "Updated" if hashed else "Cleared"
+    e = discord.Embed(title=f"HWID {action}", color=discord.Color.orange())
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="HWID Status", value=action, inline=True)
+    e.add_field(name="Reset By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
-@app_commands.command(name="banhwid", description="[ADMIN] Globally ban an HWID.")
-@app_commands.describe(raw_hwid="Raw HWID to ban", reason="Reason")
+@app_commands.command(name="hwid", description="[ADMIN] Ban or unban a hardware ID globally.")
+@app_commands.describe(action="ban or unban", raw_hwid="Raw HWID string from the loader", reason="Reason (required for ban)")
 @admin_only()
-async def cmd_banhwid(i: discord.Interaction, raw_hwid: str, reason: Optional[str] = None):
+async def cmd_hwid(i: discord.Interaction, action: str, raw_hwid: str, reason: Optional[str] = None):
     await i.response.defer(ephemeral=True)
+    action = action.lower().strip()
+    if action not in ("ban", "unban"):
+        e = discord.Embed(title="Invalid Action", color=discord.Color.red(),
+            description="Use `ban` or `unban`.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
     hashed = hash_hwid(raw_hwid)
-    try:
-        DB.execute("INSERT INTO hwid_bans (hwid,reason,banned_at,banned_by) VALUES (?,?,?,?)",
-                   (hashed, reason or "No reason", now_iso(), str(i.user.id)))
+    if action == "ban":
+        try:
+            DB.execute("INSERT INTO hwid_bans (hwid,reason,banned_at,banned_by) VALUES (?,?,?,?)",
+                       (hashed, reason or "No reason given", now_iso(), str(i.user.id)))
+            DB.commit()
+        except sqlite3.IntegrityError:
+            e = discord.Embed(title="Already Banned", color=discord.Color.orange(),
+                description="That HWID is already on the ban list.")
+            await i.followup.send(embed=e, ephemeral=True)
+            return
+        audit("HWID_BAN", actor_id=str(i.user.id), detail=hashed[:16])
+        e = discord.Embed(title="HWID Banned", color=discord.Color.red())
+        e.add_field(name="Hash", value=f"`{hashed[:24]}...`", inline=False)
+        e.add_field(name="Reason", value=reason or "None given", inline=True)
+        e.add_field(name="By", value=str(i.user), inline=True)
+        await i.followup.send(embed=e, ephemeral=True)
+        await BOT.log_embed(e)
+    else:
+        cur = DB.execute("DELETE FROM hwid_bans WHERE hwid=?", (hashed,))
         DB.commit()
-    except sqlite3.IntegrityError:
-        e = discord.Embed(title="Already Banned", color=discord.Color.orange(),
-            description="That HWID is already banned.")
+        if cur.rowcount == 0:
+            e = discord.Embed(title="Not Found", color=discord.Color.red(),
+                description="That HWID is not on the ban list.")
+            await i.followup.send(embed=e, ephemeral=True)
+            return
+        audit("HWID_UNBAN", actor_id=str(i.user.id), detail=hashed[:16])
+        e = discord.Embed(title="HWID Unbanned", color=discord.Color.green(),
+            description="Hardware ID removed from the ban list.")
         await i.followup.send(embed=e, ephemeral=True)
-        return
-    audit("HWID_BAN", actor_id=str(i.user.id), detail=hashed[:16])
-    e = discord.Embed(title="HWID Banned", color=discord.Color.red())
-    e.add_field(name="Hash", value=f"`{hashed[:24]}...`", inline=False)
-    e.add_field(name="Reason", value=reason or "None", inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
-    await i.followup.send(embed=e, ephemeral=True)
-    await BOT.log_embed(e)
-
-
-@app_commands.command(name="unbanhwid", description="[ADMIN] Remove an HWID ban.")
-@app_commands.describe(raw_hwid="Raw HWID to unban")
-@admin_only()
-async def cmd_unbanhwid(i: discord.Interaction, raw_hwid: str):
-    await i.response.defer(ephemeral=True)
-    hashed = hash_hwid(raw_hwid)
-    cur = DB.execute("DELETE FROM hwid_bans WHERE hwid=?", (hashed,))
-    DB.commit()
-    if cur.rowcount == 0:
-        e = discord.Embed(title="Not Found", color=discord.Color.red(),
-            description="That HWID is not banned.")
-        await i.followup.send(embed=e, ephemeral=True)
-        return
-    audit("HWID_UNBAN", actor_id=str(i.user.id), detail=hashed[:16])
-    e = discord.Embed(title="HWID Unbanned", color=discord.Color.green(),
-        description="Hardware ID removed from ban list.")
-    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="extend", description="[ADMIN] Set or extend a user's expiry date.")
@@ -913,9 +920,10 @@ async def cmd_extend(i: discord.Interaction, user: discord.Member, expires: str)
     DB.commit()
     audit("EXTEND", actor_id=str(i.user.id), target_id=did, detail=f"new_expiry={expires}")
     e = discord.Embed(title="Expiry Updated", color=discord.Color.green())
-    e.add_field(name="User", value=f"<@{did}>", inline=True)
-    e.add_field(name="New Expiry", value=expires, inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="New Expiry", value=f"`{expires}`", inline=True)
+    e.add_field(name="Updated By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -934,9 +942,10 @@ async def cmd_setproduct(i: discord.Interaction, user: discord.Member, product: 
     DB.commit()
     audit("SET_PRODUCT", actor_id=str(i.user.id), target_id=did, detail=f"product={product}")
     e = discord.Embed(title="Product Updated", color=discord.Color.blurple())
-    e.add_field(name="User", value=f"<@{did}>", inline=True)
-    e.add_field(name="New Product", value=product, inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="New Product", value=f"`{product}`", inline=True)
+    e.add_field(name="Updated By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -957,21 +966,31 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     DB.commit()
     audit("GRANT_RESETS", actor_id=str(i.user.id), target_id=did, detail=f"delta={count} new_val={new_val}")
     e = discord.Embed(title="Resets Updated", color=discord.Color.blurple())
-    e.add_field(name="User", value=f"<@{did}>", inline=True)
-    e.add_field(name="Reset Counter", value=str(new_val), inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+    e.add_field(name="New Counter", value=str(new_val), inline=True)
+    e.add_field(name="Updated By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
-@app_commands.command(name="authfac", description="[ADMIN] Authorize a user for a FAC HWID reset (use when they provide a valid ticket reason).")
+@app_commands.command(name="fac", description="[ADMIN] Manage FAC reset authorization for a user.")
 @app_commands.describe(
-    user="The user to authorize",
-    ticket="Ticket ID or reference (optional)",
-    reason="Reason for authorizing the FAC reset"
+    action="authorize, revoke, or check",
+    user="Target user",
+    reason="Reason (required for authorize; optional for revoke)",
+    ticket="Ticket ID or reference (optional, for authorize)"
 )
 @admin_only()
-async def cmd_authfac(i: discord.Interaction, user: discord.Member, reason: str, ticket: Optional[str] = None):
+async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
+                  reason: Optional[str] = None, ticket: Optional[str] = None):
     await i.response.defer(ephemeral=True)
+    action = action.lower().strip()
+    if action not in ("authorize", "revoke", "check"):
+        e = discord.Embed(title="Invalid Action", color=discord.Color.red(),
+            description="Use `authorize`, `revoke`, or `check`.")
+        await i.followup.send(embed=e, ephemeral=True)
+        return
+
     did = str(user.id)
     row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
     if not row:
@@ -980,96 +999,67 @@ async def cmd_authfac(i: discord.Interaction, user: discord.Member, reason: str,
         await i.followup.send(embed=e, ephemeral=True)
         return
 
-    if row["fac_reset_auth"]:
-        e = discord.Embed(title="Already Authorized", color=discord.Color.orange(),
-            description=f"<@{did}> already has an active FAC reset authorization.")
+    if action == "authorize":
+        if not reason:
+            e = discord.Embed(title="Reason Required", color=discord.Color.red(),
+                description="A reason is required when authorizing a FAC reset.")
+            await i.followup.send(embed=e, ephemeral=True)
+            return
+        if row["fac_reset_auth"]:
+            e = discord.Embed(title="Already Authorized", color=discord.Color.orange(),
+                description=f"<@{did}> already has an active FAC reset authorization.")
+            e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+            await i.followup.send(embed=e, ephemeral=True)
+            return
+        DB.execute("UPDATE users SET fac_reset_auth=1 WHERE discord_id=?", (did,))
+        DB.commit()
+        detail = f"reason={reason}" + (f" ticket={ticket}" if ticket else "")
+        audit("FAC_AUTH_GRANTED", actor_id=str(i.user.id), target_id=did, detail=detail)
+        e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
+        e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
         e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
+        e.add_field(name="Reason", value=reason, inline=True)
+        if ticket:
+            e.add_field(name="Ticket", value=ticket, inline=True)
+        e.add_field(name="Authorized By", value=str(i.user), inline=True)
+        e.set_footer(text="Revoke anytime with /fac revoke.")
         await i.followup.send(embed=e, ephemeral=True)
-        return
+        await BOT.log_embed(e)
+        try:
+            dm_e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
+            dm_e.add_field(name="Status", value="Your FAC reset request has been approved.", inline=False)
+            dm_e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`\nPresent this key when prompted.", inline=False)
+            dm_e.set_footer(text="Contact support if you have any issues.")
+            await user.send(embed=dm_e)
+        except Exception:
+            pass
 
-    DB.execute("UPDATE users SET fac_reset_auth=1 WHERE discord_id=?", (did,))
-    DB.commit()
-
-    detail = f"reason={reason}"
-    if ticket:
-        detail += f" ticket={ticket}"
-    audit("FAC_AUTH_GRANTED", actor_id=str(i.user.id), target_id=did, detail=detail)
-
-    e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
-    e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`", inline=False)
-    e.add_field(name="Reason", value=reason, inline=False)
-    if ticket:
-        e.add_field(name="Ticket", value=ticket, inline=True)
-    e.add_field(name="Authorized By", value=str(i.user), inline=True)
-    e.set_footer(text="User can now proceed with their FAC reset. Revoke with /revokefac if needed.")
-    await i.followup.send(embed=e, ephemeral=True)
-    await BOT.log_embed(e)
-
-    # Notify the user
-    try:
-        dm_e = discord.Embed(title="FAC Reset Authorized", color=discord.Color.green())
-        dm_e.add_field(name="Status", value="Your FAC reset request has been approved.", inline=False)
-        dm_e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`\nPresent this key to the system when prompted.", inline=False)
-        dm_e.set_footer(text="Contact support if you have any issues.")
-        await user.send(embed=dm_e)
-    except Exception:
-        pass
-
-
-@app_commands.command(name="revokefac", description="[ADMIN] Revoke a user's FAC reset authorization.")
-@app_commands.describe(user="The user to revoke FAC auth from", reason="Reason")
-@admin_only()
-async def cmd_revokefac(i: discord.Interaction, user: discord.Member, reason: Optional[str] = None):
-    await i.response.defer(ephemeral=True)
-    did = str(user.id)
-    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
-    if not row:
-        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
-            description="That user has no license record.")
+    elif action == "revoke":
+        if not row["fac_reset_auth"]:
+            e = discord.Embed(title="Not Authorized", color=discord.Color.orange(),
+                description=f"<@{did}> does not have an active FAC reset authorization.")
+            await i.followup.send(embed=e, ephemeral=True)
+            return
+        DB.execute("UPDATE users SET fac_reset_auth=0 WHERE discord_id=?", (did,))
+        DB.commit()
+        audit("FAC_AUTH_REVOKED", actor_id=str(i.user.id), target_id=did, detail=reason or "No reason given")
+        e = discord.Embed(title="FAC Authorization Revoked", color=discord.Color.orange())
+        e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+        e.add_field(name="Reason", value=reason or "No reason given", inline=True)
+        e.add_field(name="Revoked By", value=str(i.user), inline=True)
         await i.followup.send(embed=e, ephemeral=True)
-        return
+        await BOT.log_embed(e)
 
-    if not row["fac_reset_auth"]:
-        e = discord.Embed(title="Not Authorized", color=discord.Color.orange(),
-            description=f"<@{did}> does not have an active FAC reset authorization.")
+    else:  # check
+        authorized = bool(row["fac_reset_auth"])
+        e = discord.Embed(
+            title="FAC Reset Status",
+            color=discord.Color.green() if authorized else discord.Color.red()
+        )
+        e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
+        e.add_field(name="FAC Status", value=f"{'✅ Authorized' if authorized else '❌ Not Authorized'}", inline=True)
+        e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`" if row["fac_auth_key"] else "N/A", inline=True)
         await i.followup.send(embed=e, ephemeral=True)
-        return
-
-    DB.execute("UPDATE users SET fac_reset_auth=0 WHERE discord_id=?", (did,))
-    DB.commit()
-    audit("FAC_AUTH_REVOKED", actor_id=str(i.user.id), target_id=did, detail=reason or "No reason")
-
-    e = discord.Embed(title="FAC Authorization Revoked", color=discord.Color.orange())
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
-    e.add_field(name="Reason", value=reason or "No reason given", inline=False)
-    e.add_field(name="By", value=str(i.user), inline=True)
-    await i.followup.send(embed=e, ephemeral=True)
-    await BOT.log_embed(e)
-
-
-@app_commands.command(name="checkfac", description="[ADMIN] Check a user's FAC reset authorization status.")
-@app_commands.describe(user="The user to check")
-@admin_only()
-async def cmd_checkfac(i: discord.Interaction, user: discord.Member):
-    await i.response.defer(ephemeral=True)
-    did = str(user.id)
-    row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
-    if not row:
-        e = discord.Embed(title="Not Registered", color=discord.Color.red(),
-            description="That user has no license record.")
-        await i.followup.send(embed=e, ephemeral=True)
-        return
-
-    authorized = bool(row["fac_reset_auth"])
-    color = discord.Color.green() if authorized else discord.Color.red()
-    status_text = "Authorized" if authorized else "Not Authorized"
-
-    e = discord.Embed(title="FAC Reset Status", color=color)
-    e.add_field(name="User", value=f"<@{did}> ({did})", inline=False)
-    e.add_field(name="FAC Status", value=f"{'✅' if authorized else '❌'} {status_text}", inline=True)
-    e.add_field(name="FAC Auth Key", value=f"`{row['fac_auth_key']}`" if row["fac_auth_key"] else "N/A", inline=True)
-    await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="listusers", description="[ADMIN] Browse registered users.")
@@ -1142,8 +1132,11 @@ async def cmd_deletekey(i: discord.Interaction, key: str):
         await i.followup.send(embed=e, ephemeral=True)
         return
     audit("DELETE_KEY", actor_id=str(i.user.id), detail=f"key={key[:20]}")
-    e = discord.Embed(title="Key Deleted", color=discord.Color.green(),
-        description=f"`{key}` removed from pool.")
+    e = discord.Embed(title="Key Deleted", color=discord.Color.green())
+    e.add_field(name="Key", value=f"`{key.strip().upper()}`", inline=False)
+    e.add_field(name="Status", value="Removed from pool", inline=True)
+    e.add_field(name="Deleted By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -1201,22 +1194,24 @@ async def cmd_stats(i: discord.Interaction):
         "SELECT COUNT(*) FROM audit_log WHERE action='REGISTER_SUCCESS' AND timestamp LIKE ?",
         (today + "%",)
     ).fetchone()[0]
-    e = discord.Embed(title="KeyLock Stats", color=discord.Color.blurple())
+    e = discord.Embed(title="System Stats", color=discord.Color.blurple())
     e.add_field(name="Total Users", value=str(total), inline=True)
     e.add_field(name="Active", value=str(active), inline=True)
     e.add_field(name="Banned", value=str(banned), inline=True)
     e.add_field(name="Revoked", value=str(revoked), inline=True)
     e.add_field(name="Unclaimed Keys", value=str(unclaim), inline=True)
     e.add_field(name="Claimed Keys", value=str(claimed), inline=True)
-    e.add_field(name="HWID Bans", value=str(hwbans), inline=True)
+    e.add_field(name="HWID/IP Bans", value=str(hwbans), inline=True)
     e.add_field(name="Audit Entries", value=str(logs), inline=True)
+    e.add_field(name="​", value="​", inline=True)
     e.add_field(name="Logins Today", value=str(logins_today), inline=True)
     e.add_field(name="Registrations Today", value=str(regs_today), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
 @app_commands.command(name="announce",
-    description="[ADMIN] Send a styled CV2 announcement to any channel.")
+    description="[ADMIN] Send a styled embed announcement to any channel.")
 @app_commands.describe(
     channel="Target channel",
     title="Announcement title",
@@ -1240,8 +1235,10 @@ async def cmd_announce(i: discord.Interaction,
     ann_embed.set_footer(text=i.guild.name)
     await channel.send(embed=ann_embed)
     audit("ANNOUNCE", actor_id=str(i.user.id), detail=f"channel={channel.id} title={title[:50]}")
-    e = discord.Embed(title="Announcement Sent", color=discord.Color.green(),
-        description=f"Posted to {channel.mention}.")
+    e = discord.Embed(title="Announcement Sent", color=discord.Color.green())
+    e.add_field(name="Channel", value=channel.mention, inline=True)
+    e.add_field(name="Sent By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -1268,9 +1265,11 @@ async def cmd_purgeexpired(i: discord.Interaction):
                 pass
     DB.commit()
     audit("PURGE_EXPIRED", actor_id=str(i.user.id), detail=f"revoked {count}")
-    e = discord.Embed(title="Purge Complete", color=discord.Color.orange())
+    e = discord.Embed(title="Purge Complete", color=discord.Color.orange(),
+        description="All expired active licenses have been revoked and roles stripped.")
     e.add_field(name="Licenses Revoked", value=str(count), inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="Run By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
 
 
@@ -1303,9 +1302,10 @@ async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: st
         pass
     audit("WIPE_USER", actor_id=str(i.user.id), target_id=did)
     e = discord.Embed(title="User Wiped", color=discord.Color.dark_red())
-    e.add_field(name="User", value=f"{user} ({did})", inline=True)
+    e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
     e.add_field(name="Key", value="Returned to pool", inline=True)
-    e.add_field(name="By", value=str(i.user), inline=True)
+    e.add_field(name="Wiped By", value=str(i.user), inline=True)
+    e.set_footer(text=now_iso()[:19].replace("T", " ") + " UTC")
     await i.followup.send(embed=e, ephemeral=True)
     await BOT.log_embed(e)
 
@@ -1719,9 +1719,9 @@ def start_api(port: int):
 ALL_COMMANDS = [
     cmd_register, cmd_mystatus,
     cmd_keygen, cmd_lookup, cmd_profile, cmd_ban, cmd_unban, cmd_revoke,
-    cmd_addnote, cmd_resethwid, cmd_banhwid, cmd_unbanhwid,
+    cmd_addnote, cmd_resethwid, cmd_hwid,
     cmd_extend, cmd_setproduct, cmd_grantresets,
-    cmd_authfac, cmd_revokefac, cmd_checkfac,
+    cmd_fac,
     cmd_listusers, cmd_listkeys, cmd_deletekey,
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
