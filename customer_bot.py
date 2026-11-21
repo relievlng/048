@@ -459,6 +459,137 @@ intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+SENTINEL = "/data/.customer_channels_done"
+
+async def _setup_customer_channels(guild: discord.Guild):
+    """Auto-create verify and hwid-reset channels if not done yet. Prints IDs for Railway env vars."""
+    if os.path.exists(SENTINEL):
+        return
+
+    log.info("First run: setting up customer channels...")
+
+    admin_role = guild.get_role(CONFIG["admin_role_id"])
+
+    # Channels to create: (name, everyone_read, config_key)
+    CHANNELS = [
+        ("verify",     True),
+        ("hwid-reset", True),
+        ("tickets",    True),
+        ("rules",      True),
+    ]
+
+    created = {}
+    for ch_name, public in CHANNELS:
+        existing = discord.utils.get(guild.text_channels, name=ch_name)
+        if existing:
+            created[ch_name] = existing
+            log.info(f"  #{ch_name} already exists ({existing.id})")
+            continue
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=public,
+                send_messages=False,
+                read_message_history=public,
+            ),
+        }
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                manage_channels=True, manage_messages=True,
+            )
+
+        ch = await guild.create_text_channel(name=ch_name, overwrites=overwrites)
+        created[ch_name] = ch
+        log.info(f"  Created #{ch_name} ({ch.id})")
+
+    # Post verify panel
+    verify_ch = created.get("verify")
+    if verify_ch:
+        embed = discord.Embed(
+            title="Verification",
+            description=(
+                "To access this server, verify your license key.\n\n"
+                "Click **Verify** below and enter your license key when prompted.\n"
+                "Your key is linked to your Discord account permanently."
+            ),
+            color=0x2b2d31,
+        )
+        embed.set_footer(text="One key per Discord account.")
+        await verify_ch.send(embed=embed, view=VerifyView())
+
+    # Post HWID panel
+    hwid_ch = created.get("hwid-reset")
+    if hwid_ch:
+        embed = discord.Embed(
+            title="HWID Reset",
+            description=(
+                "If you have changed hardware or reinstalled Windows, you can reset your HWID here.\n\n"
+                "Click **Reset HWID** below. You have a limited number of resets.\n"
+                "If you have used all resets, open a ticket in the key/HWID category."
+            ),
+            color=0x2b2d31,
+        )
+        embed.set_footer(text="HWID resets are limited. Use only when necessary.")
+        await hwid_ch.send(embed=embed, view=HWIDView())
+
+    # Post ticket panel
+    ticket_ch = created.get("tickets")
+    if ticket_ch:
+        embed = discord.Embed(
+            title="Tickets",
+            description="Choose a category. A private channel opens and staff meet you there.",
+            color=0x2b2d31,
+        )
+        for cat_id, cat in TICKET_CATEGORIES.items():
+            embed.add_field(name=f"{cat['emoji']} {cat['label']}", value=cat["desc"], inline=False)
+        await ticket_ch.send(embed=embed, view=TicketPanelView())
+
+    # Post rules
+    rules_ch = created.get("rules")
+    if rules_ch:
+        embed = discord.Embed(
+            title="Server Rules",
+            description=(
+                "By being in this server you agree to the following rules.\n"
+                "Violations may result in removal from the server or key termination."
+            ),
+            color=0x2b2d31,
+        )
+        rules = [
+            ("1. Respect everyone", "Harassment, discrimination, and toxicity are not tolerated."),
+            ("2. No sharing keys", "License keys are non-transferable. Sharing a key will result in a permanent ban."),
+            ("3. No chargebacks", "Initiating a chargeback voids your license immediately with no refund."),
+            ("4. No leaking", "Do not share, leak, or redistribute any files or software from this server."),
+            ("5. No ban evasion", "Attempting to bypass a ban results in a permanent blacklist."),
+            ("6. Use correct channels", "Keep discussions in their respective channels."),
+            ("7. No advertising", "Advertising other products or services without permission is not allowed."),
+            ("8. Follow Discord ToS", "All Discord Terms of Service rules apply at all times."),
+        ]
+        for name, value in rules:
+            embed.add_field(name=name, value=value, inline=False)
+        embed.set_footer(text="Last updated by staff")
+        await rules_ch.send(embed=embed)
+
+    # Print IDs for Railway
+    print("\n" + "=" * 60)
+    print("===== CUSTOMER BOT - RAILWAY ENV VARS =====")
+    print("Paste these into your Railway customer bot service:")
+    print("=" * 60)
+    for ch_name, ch in created.items():
+        key = f"{ch_name.upper().replace('-', '_')}_CHANNEL_ID"
+        print(f"{key}={ch.id}")
+    print(f"GUILD_ID={guild.id}")
+    print("=" * 60 + "\n")
+
+    # Write sentinel so this doesn't re-run
+    os.makedirs("/data", exist_ok=True)
+    with open(SENTINEL, "w") as f:
+        f.write("done")
+
+    log.info("Customer channel setup complete.")
+
+
 @bot.event
 async def on_ready():
     log.info(f"Customer Bot ready as {bot.user} ({bot.user.id})")
@@ -472,6 +603,12 @@ async def on_ready():
         log.info(f"Synced {len(synced)} slash commands")
     except Exception as e:
         log.error(f"Slash sync failed: {e}")
+
+    guild = bot.get_guild(CONFIG["guild_id"])
+    if guild:
+        await _setup_customer_channels(guild)
+    else:
+        log.warning(f"Guild {CONFIG['guild_id']} not found - skipping channel setup")
 
 # ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 
