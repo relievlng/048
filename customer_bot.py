@@ -252,6 +252,180 @@ async def _reply_v2(
         ephemeral=ephemeral,
     )
 
+# ─── COMPONENTS V2 PANEL HELPERS ──────────────────────────────────────────────
+# Panel messages (verify, ticket, hwid, rules, info) are posted via Discord REST
+# API directly with flags=IS_COMPONENTS_V2. Persistent discord.py views handle
+# the button interactions (custom_ids match the payload buttons).
+
+def _emoji_obj(name: str) -> dict | None:
+    """Parse a custom emoji <:name:id> string into a Discord API emoji object."""
+    raw = EMOJIS.get(name, "")
+    if raw.startswith("<a:"):
+        parts = raw.strip("<>").split(":")
+        if len(parts) == 3:
+            _, ename, eid = parts
+            return {"id": eid, "name": ename, "animated": True}
+    elif raw.startswith("<:"):
+        parts = raw.strip("<>").split(":")
+        if len(parts) == 3:
+            _, ename, eid = parts
+            return {"id": eid, "name": ename, "animated": False}
+    return None
+
+
+async def _post_channel_v2(channel: discord.TextChannel, payload: dict) -> None:
+    """POST a Components v2 message to a channel via Discord REST API."""
+    url = f"https://discord.com/api/v10/channels/{channel.id}/messages"
+    headers = {
+        "Authorization": f"Bot {CONFIG['token']}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            if resp.status not in (200, 201):
+                body = await resp.text()
+                log.error("_post_channel_v2 #%s failed %d: %s", channel.name, resp.status, body)
+                raise RuntimeError(f"Discord API {resp.status}")
+
+
+def _v2_banner() -> list:
+    """Return a MediaGallery component for the logo banner, or [] if no LOGO_URL."""
+    url = CONFIG.get("logo_url")
+    if not url:
+        return []
+    return [{"type": 12, "items": [{"media": {"url": url}}]}]
+
+
+def _v2_section(text: str, btn_label: str, btn_custom_id: str,
+                btn_emoji_name: str = None, btn_style: int = 2) -> dict:
+    """Section (type 9): TextDisplay left + Button accessory right, Pyrex style."""
+    btn: dict = {
+        "type": 2,
+        "label": btn_label,
+        "style": btn_style,
+        "custom_id": btn_custom_id,
+    }
+    if btn_emoji_name:
+        em = _emoji_obj(btn_emoji_name)
+        if em:
+            btn["emoji"] = em
+    return {
+        "type": 9,
+        "components": [{"type": 10, "content": text}],
+        "accessory": btn,
+    }
+
+
+def _v2_container(body: list, accent: int = 0x2b2d31) -> dict:
+    """Wrap body in a Container with IS_COMPONENTS_V2 flag and accent color."""
+    return {
+        "flags": 1 << 15,
+        "components": [{"type": 17, "accent_color": accent, "components": body}],
+    }
+
+
+def _ticket_panel_payload() -> dict:
+    body: list = []
+    body.extend(_v2_banner())
+    body.append({"type": 10, "content": (
+        "## Open a Ticket\n"
+        "Choose a category below. A private channel opens and staff meet you there."
+    )})
+    body.append({"type": 14})
+    for cat_id, cat in TICKET_CATEGORIES.items():
+        body.append(_v2_section(
+            f"**{cat['label']}**\n{cat['desc']}",
+            cat["label"],
+            f"ticket_open_{cat_id}",
+        ))
+    return _v2_container(body)
+
+
+def _verify_panel_payload() -> dict:
+    body: list = []
+    body.extend(_v2_banner())
+    body.append({"type": 10, "content": (
+        "## Verification\n"
+        "To access this server you need to verify your license key.\n\n"
+        "Your key is linked to your Discord account permanently.\n\n"
+        "-# One key per Discord account."
+    )})
+    body.append({"type": 14})
+    body.append(_v2_section(
+        "Click **Verify** and enter your license key when prompted.",
+        "Verify",
+        "verify_button",
+        btn_style=3,
+    ))
+    return _v2_container(body)
+
+
+def _hwid_panel_payload() -> dict:
+    body: list = []
+    body.extend(_v2_banner())
+    body.append({"type": 10, "content": (
+        "## HWID Reset\n"
+        "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
+        "You have a limited number of resets - use only when necessary.\n"
+        "Used all resets? Open a ticket in the Key / HWID category.\n\n"
+        "-# HWID resets are logged and monitored."
+    )})
+    body.append({"type": 14})
+    body.append(_v2_section(
+        "Click **Reset HWID** to clear your hardware ID.",
+        "Reset HWID",
+        "hwid_reset_button",
+    ))
+    return _v2_container(body)
+
+
+def _rules_panel_payload() -> dict:
+    rules = [
+        ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
+        ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
+        ("No chargebacks",      "Initiating a chargeback voids your license immediately with no refund."),
+        ("No leaking",          "Do not share, leak, or redistribute any files or software from this server."),
+        ("No ban evasion",      "Attempting to bypass a ban results in a permanent blacklist."),
+        ("Use correct channels","Keep discussions in their respective channels."),
+        ("No advertising",      "Advertising other products or services without permission is not allowed."),
+        ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
+    ]
+    rule_lines = "\n".join(f"**{n}** - {v}" for n, v in rules)
+    body: list = []
+    body.extend(_v2_banner())
+    body.append({"type": 10, "content": (
+        "## Server Rules\n"
+        "By being in this server you agree to the following rules. "
+        "Violations may result in removal or key termination.\n\n"
+        f"{rule_lines}\n\n"
+        "-# Last updated by staff"
+    )})
+    return _v2_container(body)
+
+
+def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
+    body: list = []
+    body.extend(_v2_banner())
+    body.append({"type": 10, "content": (
+        "## Awaiting Setup?\n"
+        "Complete every step below, then wait for the Setup Team.\n\n"
+        f"**Get Setup Pings** - Click the button below to receive setup pings (click again to remove).\n\n"
+        f"**Open a Setup Ticket** - Open a setup ticket in {ticket_ref}. "
+        "Your Invoice ID is in your DMs with this bot.\n\n"
+        f"**Wait for the Setup Team** - Check {alerts_ref} regularly. "
+        "When a team member is available, ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
+        "Do **NOT** ping staff unless they have announced they are available for setups.\n\n"
+        "-# Failing to follow these steps may delay your setup."
+    )})
+    body.append({"type": 14})
+    body.append(_v2_section(
+        "Toggle setup pings - get pinged when the setup team is available.",
+        "Setup Pings",
+        "setup_pings_toggle",
+    ))
+    return _v2_container(body)
+
+
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
@@ -591,16 +765,7 @@ async def on_ready():
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_tickets(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    cats = "\n".join(
-        f"{e('dot')} **{cat['label']}** - {cat['desc']}"
-        for cat in TICKET_CATEGORIES.values()
-    )
-    text = (
-        f"## {e('ticket')} Open a Ticket\n\n"
-        "Choose a category below. A private channel opens and staff meet you there.\n\n"
-        f"{cats}"
-    )
-    await _send_v2(interaction.channel, text, color=0x2b2d31, view=TicketPanelView())
+    await _post_channel_v2(interaction.channel, _ticket_panel_payload())
     await interaction.followup.send(f"{e('verify')} Ticket panel posted.", ephemeral=True)
 
 
@@ -608,14 +773,7 @@ async def setup_tickets(interaction: discord.Interaction):
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    text = (
-        f"## {e('verify')} Verification\n\n"
-        "To access this server you need to verify your license key.\n\n"
-        f"{e('arrow')} Click **Verify** below and enter your license key when prompted.\n"
-        f"{e('key')} Your key is linked to your Discord account permanently.\n\n"
-        "-# One key per Discord account."
-    )
-    await _send_v2(interaction.channel, text, color=0x2b2d31, view=VerifyView())
+    await _post_channel_v2(interaction.channel, _verify_panel_payload())
     await interaction.followup.send(f"{e('verify')} Verification panel posted.", ephemeral=True)
 
 
@@ -623,15 +781,7 @@ async def setup_verify(interaction: discord.Interaction):
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_hwid(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    text = (
-        f"## {e('chip')} HWID Reset\n\n"
-        "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
-        f"{e('arrow')} Click **Reset HWID** below.\n"
-        f"{e('warn')} You have a limited number of resets - use only when necessary.\n"
-        f"{e('ticket')} Used all resets? Open a ticket in the Key / HWID category.\n\n"
-        "-# HWID resets are logged and monitored."
-    )
-    await _send_v2(interaction.channel, text, color=0x2b2d31, view=HWIDView())
+    await _post_channel_v2(interaction.channel, _hwid_panel_payload())
     await interaction.followup.send(f"{e('verify')} HWID panel posted.", ephemeral=True)
 
 
@@ -639,28 +789,7 @@ async def setup_hwid(interaction: discord.Interaction):
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_rules(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    rules = [
-        ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
-        ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
-        ("No chargebacks",      "Initiating a chargeback voids your license immediately with no refund."),
-        ("No leaking",          "Do not share, leak, or redistribute any files or software from this server."),
-        ("No ban evasion",      "Attempting to bypass a ban results in a permanent blacklist."),
-        ("Use correct channels","Keep discussions in their respective channels."),
-        ("No advertising",      "Advertising other products or services without permission is not allowed."),
-        ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
-    ]
-    rule_lines = "\n".join(
-        f"{e('dot')} **{name}** - {value}"
-        for name, value in rules
-    )
-    text = (
-        f"## {e('rules')} Server Rules\n\n"
-        "By being in this server you agree to the following rules.\n"
-        "Violations may result in removal or key termination.\n\n"
-        f"{rule_lines}\n\n"
-        "-# Last updated by staff"
-    )
-    await _send_v2(interaction.channel, text, color=0x2b2d31)
+    await _post_channel_v2(interaction.channel, _rules_panel_payload())
     await interaction.followup.send(f"{e('verify')} Rules posted.", ephemeral=True)
 
 
@@ -669,23 +798,11 @@ async def setup_rules(interaction: discord.Interaction):
 async def setup_info_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
-
     ticket_ch = guild.get_channel(CONFIG["ticket_channel_id"])
     ticket_ref = ticket_ch.mention if ticket_ch else "#open-a-ticket"
-
     alerts_ch = guild.get_channel(CONFIG["setup_alerts_channel_id"]) if CONFIG["setup_alerts_channel_id"] else None
     alerts_ref = alerts_ch.mention if alerts_ch else "#setup-alerts"
-
-    text = (
-        f"## {e('warn')} Awaiting Setup?\n\n"
-        "Complete every step below, then wait for the Setup Team.\n\n"
-        f"{e('dot')} **Get Setup Pings** - Click the button below to receive setup pings (click again to remove).\n\n"
-        f"{e('dot')} **Open a Setup Ticket** - Open a setup ticket in {ticket_ref}. Your Invoice ID is in your DMs with this bot.\n\n"
-        f"{e('dot')} **Wait for the Setup Team** - Check {alerts_ref} regularly. When a team member is available, ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
-        f"{e('warn')} Do **NOT** ping staff unless they have announced they are available for setups.\n\n"
-        "-# Failing to follow these steps may delay your setup."
-    )
-    await _send_v2(interaction.channel, text, color=0x2b2d31, view=SetupPingsView())
+    await _post_channel_v2(interaction.channel, _setup_info_payload(ticket_ref, alerts_ref))
     await interaction.followup.send(f"{e('verify')} Setup info posted.", ephemeral=True)
 
 
