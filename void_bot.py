@@ -1385,10 +1385,38 @@ class _Health(BaseHTTPRequestHandler):
         try:
             conn = sqlite3.connect(CONFIG["db_path"])
             conn.row_factory = sqlite3.Row
-            ticket = conn.execute(
-                "SELECT user_id, product FROM void_tickets WHERE invoice_id=?",
-                (invoice_id,)
-            ).fetchone()
+            if invoice_id:
+                # Legacy flow: check by invoice_id + validate discord_id matches
+                ticket = conn.execute(
+                    "SELECT user_id, product FROM void_tickets WHERE invoice_id=?",
+                    (invoice_id,)
+                ).fetchone()
+                if not ticket:
+                    resp = {"valid": False, "reason": "not_found"}
+                elif ticket["user_id"] != discord_id:
+                    resp = {"valid": False, "reason": "wrong_user"}
+                else:
+                    resp = {"valid": True, "invoice_id": invoice_id,
+                            "product": ticket["product"] if "product" in ticket.keys() else None}
+            else:
+                # Discord-ID-only flow: check tickets then payments by discord_id
+                ticket = conn.execute(
+                    "SELECT invoice_id, product FROM void_tickets WHERE user_id=?",
+                    (discord_id,)
+                ).fetchone()
+                if ticket:
+                    resp = {"valid": True, "invoice_id": ticket["invoice_id"],
+                            "product": ticket["product"] if "product" in ticket.keys() else None}
+                else:
+                    payment = conn.execute(
+                        "SELECT invoice_id, product FROM payments WHERE discord_id=?",
+                        (discord_id,)
+                    ).fetchone()
+                    if payment:
+                        resp = {"valid": True, "invoice_id": payment["invoice_id"],
+                                "product": payment["product"] if "product" in payment.keys() else None}
+                    else:
+                        resp = {"valid": False, "reason": "not_found"}
             conn.close()
         except Exception as ex:
             resp_data = json.dumps({"error": str(ex)}).encode()
@@ -1398,14 +1426,6 @@ class _Health(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(resp_data)
             return
-
-        if not ticket:
-            resp = {"valid": False, "reason": "not_found"}
-        elif ticket["user_id"] != discord_id:
-            resp = {"valid": False, "reason": "wrong_user"}
-        else:
-            resp = {"valid": True, "invoice_id": invoice_id,
-                    "product": ticket["product"] if "product" in ticket.keys() else None}
 
         resp_data = json.dumps(resp).encode()
         self.send_response(200)

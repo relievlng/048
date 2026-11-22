@@ -467,19 +467,19 @@ def _verify_panel_payload() -> dict:
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Enter your Invoice ID to unlock access and get set up."
+        "Click the button below to unlock access to the server."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}After purchase, staff will DM you an Invoice ID.\n"
-        f"{bullet}Enter that Invoice ID here to verify your purchase.\n"
-        f"{bullet}Use the same Invoice ID to re-verify at any time."
+        f"{bullet}After purchase, your Discord account is linked to your order.\n"
+        f"{bullet}Click Verify and complete the quick spam check.\n"
+        f"{bullet}You can re-verify at any time if you lose your role."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
         f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
-        f"{bullet}Have your Invoice ID ready before clicking.",
+        f"{bullet}Just click the button - no Invoice ID needed.",
         "Verify",
         "verify_button",
         btn_emoji_name="verify",
@@ -1602,22 +1602,42 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
 
 # ─── VERIFICATION VIEW ────────────────────────────────────────────────────────
 
-class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
-    invoice_input = discord.ui.TextInput(
-        label="Invoice ID",
-        placeholder="e.g. VD-XXXX-XXXX-XXXX-XXXX",
-        min_length=5,
-        max_length=32,
-    )
+import random as _random
+
+class VerifyCaptchaModal(discord.ui.Modal):
+    """Spam-check modal shown before verifying. No Invoice ID needed."""
+
+    def __init__(self, a: int, b: int):
+        super().__init__(title="Verification - Spam Check")
+        self._a      = a
+        self._b      = b
+        self._answer = a + b
+        self.captcha_input = discord.ui.TextInput(
+            label=f"Quick check: what is {a} + {b}?",
+            placeholder="Enter the number...",
+            min_length=1,
+            max_length=3,
+        )
+        self.add_item(self.captcha_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        invoice_id = self.invoice_input.value.strip().upper()
-        member     = interaction.user
-        guild      = interaction.guild
 
-        void_url  = CONFIG.get("void_bot_url", "").rstrip("/")
-        api_key   = CONFIG.get("internal_api_key", "")
+        # Validate captcha answer
+        try:
+            given = int(self.captcha_input.value.strip())
+        except ValueError:
+            await interaction.followup.send("Please enter a number. Try again.", ephemeral=True)
+            return
+        if given != self._answer:
+            await interaction.followup.send("Incorrect answer. Click Verify to try again.", ephemeral=True)
+            return
+
+        member = interaction.user
+        guild  = interaction.guild
+
+        void_url = CONFIG.get("void_bot_url", "").rstrip("/")
+        api_key  = CONFIG.get("internal_api_key", "")
 
         if not void_url:
             await interaction.followup.send(
@@ -1625,12 +1645,12 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
             )
             return
 
-        # Call void_bot's /verify endpoint
+        # Call void_bot's /verify endpoint - discord_id only, no invoice needed
         try:
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     f"{void_url}/verify",
-                    json={"invoice_id": invoice_id, "discord_id": str(member.id), "api_key": api_key},
+                    json={"discord_id": str(member.id), "api_key": api_key},
                     timeout=aiohttp.ClientTimeout(total=8),
                 )
                 data = await resp.json(content_type=None)
@@ -1641,14 +1661,12 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
             )
             return
 
-        log.info("Verify response user=%s invoice=%s data=%s", member.id, invoice_id, data)
+        log.info("Verify response user=%s data=%s", member.id, data)
 
         if not data.get("valid"):
             reason = data.get("reason", "unknown")
             if reason == "not_found":
-                msg = "Invoice ID not found. Double-check the ID from your DM and try again."
-            elif reason == "wrong_user":
-                msg = "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong."
+                msg = "No purchase found for your account. Contact staff if you believe this is wrong."
             else:
                 msg = f"Verification failed ({reason}). Contact staff."
             await interaction.followup.send(msg, ephemeral=True)
@@ -1660,7 +1678,7 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         if verified_role:
             if verified_role not in member.roles:
                 try:
-                    await member.add_roles(verified_role, reason=f"Invoice {invoice_id}")
+                    await member.add_roles(verified_role, reason="Verified - purchase confirmed")
                     role_assigned = True
                 except Exception as ex:
                     log.warning("Could not assign verified role user=%s: %s", member.id, ex)
@@ -1670,18 +1688,21 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         status = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
         await interaction.followup.send(f"Verified. {status}", ephemeral=True)
 
-        log.info("Verified user=%s invoice=%s role_assigned=%s", member.id, invoice_id, role_assigned)
+        log.info("Verified user=%s role_assigned=%s", member.id, role_assigned)
         try:
             await send_log(
                 title="User Verified",
                 description=f"{member.mention} (`{member.name}` - `{member.id}`)",
                 color=0x57F287,
                 webhook_key="wh_verifications",
-                fields=[{"name": "Invoice ID", "value": f"`{invoice_id}`", "inline": True}],
                 footer=f"User ID: {member.id}",
             )
         except Exception as ex:
             log.warning("Verify log failed: %s", ex)
+
+
+# Keep old name as alias so any lingering references don't break
+VerifyModal = VerifyCaptchaModal
 
 
 class VerifyView(discord.ui.View):
@@ -1690,8 +1711,9 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_button")
     async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Always open the modal - re-verification with the same invoice ID is allowed
-        await interaction.response.send_modal(VerifyModal())
+        a = _random.randint(1, 9)
+        b = _random.randint(1, 9)
+        await interaction.response.send_modal(VerifyCaptchaModal(a, b))
 
 # ─── HWID RESET VIEW ──────────────────────────────────────────────────────────
 
@@ -1945,7 +1967,9 @@ async def verify_cmd(interaction: discord.Interaction):
             color=0x57F287,
         )
         return
-    await interaction.response.send_modal(VerifyModal())
+    a = _random.randint(1, 9)
+    b = _random.randint(1, 9)
+    await interaction.response.send_modal(VerifyCaptchaModal(a, b))
 
 
 @bot.tree.command(name="lookup", description="[Admin] Look up a user's key by Discord ID.")
