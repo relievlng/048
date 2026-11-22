@@ -12,6 +12,8 @@ import logging
 import asyncio
 import aiohttp
 import os
+import re
+import io
 from datetime import datetime, timezone
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -22,7 +24,8 @@ import threading
 def _load_webhooks_env(path: str = "/data/webhooks.env") -> int:
     """
     Read webhook URLs from the shared volume file written by the staff bot.
-    Populates os.environ for any key not already set, so CONFIG picks them up.
+    Overwrites any env key that is missing or empty, so Railway env vars set
+    to blank strings don't block the file values from loading.
     Returns the number of keys loaded.
     """
     if not os.path.isfile(path):
@@ -36,7 +39,8 @@ def _load_webhooks_env(path: str = "/data/webhooks.env") -> int:
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            if key and val and key not in os.environ:
+            # Overwrite if the env var is missing OR set to an empty string
+            if key and val and not os.environ.get(key, "").strip():
                 os.environ[key] = val
                 loaded += 1
     return loaded
@@ -503,23 +507,24 @@ async def _ensure_ticket_categories(guild: discord.Guild) -> None:
 
     created_any = False
     for cat_id, cat in TICKET_CATEGORIES.items():
-        config_key = cat["config_key"]
-        env_var    = config_key.upper().replace("ticket_", "TICKET_")  # -> TICKET_CAT_SUPPORT etc.
+        config_key   = cat["config_key"]
+        env_var      = config_key.upper().replace("ticket_", "TICKET_")  # -> TICKET_CAT_SUPPORT etc.
+        # cat_name is the sanitized Discord-safe name (no slashes); label is the display name
+        discord_name = cat["cat_name"]
 
         if CONFIG.get(config_key):
             ch = guild.get_channel(CONFIG[config_key])
             if ch:
-                log.info("Ticket category %-10s already set -> #%s (%d)", cat["label"], ch.name, ch.id)
+                log.info("Ticket category %-15s already set -> %s (%d)", cat["label"], ch.name, ch.id)
                 continue
             # Stale ID in config - fall through and re-create
             log.warning("Ticket category %s ID %d not found, re-creating", cat["label"], CONFIG[config_key])
 
-        # Look for an existing category by name
-        discord_name = cat["label"]
+        # Look for an existing category by discord_name (sanitized)
         existing = discord.utils.get(guild.categories, name=discord_name)
         if existing:
             CONFIG[config_key] = existing.id
-            log.info("Reused existing category %-15s -> #%s (%d)  (set %s=%d)",
+            log.info("Reused existing category %-15s -> %s (%d)  (set %s=%d)",
                      discord_name, existing.name, existing.id, env_var, existing.id)
             continue
 
@@ -658,10 +663,10 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":    {"label": "Support",            "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
-    "setup":      {"label": "Setup",              "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
-    "purchase":   {"label": "Purchase / Renewal", "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
-    "management": {"label": "Management",         "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
+    "support":    {"label": "Support",            "cat_name": "Support",          "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
+    "setup":      {"label": "Setup",              "cat_name": "Setup",            "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
+    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
+    "management": {"label": "Management",         "cat_name": "Management",       "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
 }
 
 class TicketPanelView(discord.ui.View):
@@ -752,9 +757,10 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         view=TicketControlView(),
     )
 
+    # Use channel.jump_url so the link renders correctly even before cache propagates
     await _reply_v2(
         interaction,
-        f"{e('arrow')} Your ticket has been opened: {channel.mention}",
+        f"{e('arrow')} **Ticket opened.**\nHead to your private channel: [#{channel.name}]({channel.jump_url})",
         color=0x57F287,
     )
 
@@ -770,6 +776,49 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
     )
 
 
+async def _dm_ticket_closed(
+    channel: discord.TextChannel,
+    closed_by: discord.Member,
+    transcript: str,
+) -> None:
+    """DM the ticket opener when their ticket is closed, with a transcript file."""
+    if not channel.topic:
+        return
+    # Channel topic is set as: "{cat_label} | {member} ({member.id})"
+    match = re.search(r'\((\d+)\)\s*$', channel.topic)
+    if not match:
+        return
+
+    try:
+        opener_id = int(match.group(1))
+        opener = channel.guild.get_member(opener_id)
+        if not opener:
+            return
+
+        # Parse category label from topic
+        cat_label = channel.topic.split(" | ")[0] if " | " in channel.topic else "Unknown"
+
+        summary = (
+            f"## Ticket Closed\n\n"
+            f"**Channel** {channel.name}\n"
+            f"**Category** {cat_label}\n"
+            f"**Closed by** {closed_by}\n\n"
+            "Your full conversation transcript is attached."
+        )
+
+        file = discord.File(
+            io.BytesIO(transcript.encode("utf-8")),
+            filename=f"transcript-{channel.name}.txt",
+        )
+        await opener.send(embed=_make_embed(summary, 0x2b2d31), file=file)
+        log.info("DMed transcript to %s (%d) for %s", opener, opener_id, channel.name)
+
+    except discord.Forbidden:
+        log.info("Cannot DM ticket opener %s - DMs are disabled", match.group(1))
+    except Exception as exc:
+        log.warning("Failed to DM ticket opener: %s", exc)
+
+
 async def close_ticket(interaction: discord.Interaction):
     channel = interaction.channel
     admin_role = interaction.guild.get_role(CONFIG["admin_role_id"])
@@ -781,15 +830,17 @@ async def close_ticket(interaction: discord.Interaction):
 
     await interaction.response.send_message("Closing ticket in 5 seconds...")
 
+    # Collect full transcript (all messages including bot ones for context)
     messages = []
     msg_count = 0
-    async for msg in channel.history(limit=200, oldest_first=True):
+    async for msg in channel.history(limit=500, oldest_first=True):
+        msg_count += 1
         if not msg.author.bot:
-            msg_count += 1
-            content = msg.content or "[no content - enable Message Content Intent]"
-            messages.append(f"[{msg.created_at.strftime('%H:%M')}] {msg.author}: {content}")
-    transcript = "\n".join(messages) if messages else f"No messages recorded ({msg_count} total)."
+            content = msg.content or "[attachment/embed]"
+            messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author}: {content}")
+    transcript = "\n".join(messages) if messages else f"No user messages recorded ({msg_count} total)."
 
+    # Send staff Discord logs
     await send_log(
         title=f"{e('ticket')} Ticket Closed",
         description=(
@@ -807,6 +858,9 @@ async def close_ticket(interaction: discord.Interaction):
             color=0x5865F2,
             webhook_key="wh_ticket_transcripts",
         )
+
+    # DM the ticket opener with the full transcript as a file
+    await _dm_ticket_closed(channel, interaction.user, transcript)
 
     await asyncio.sleep(5)
     await channel.delete(reason=f"Ticket closed by {interaction.user}")
@@ -979,6 +1033,28 @@ async def on_ready():
         log.info("Loaded %d webhook URL(s) from /data/webhooks.env", _webhooks_loaded)
     else:
         log.warning("No /data/webhooks.env found - logs will not reach staff Discord until staff bot runs /setup")
+
+    # Log webhook URL status so it's visible in Railway logs on every boot
+    _WEBHOOK_STATUS = {
+        "wh_verifications":      "WEBHOOK_CUSTOMER_VERIFICATIONS",
+        "wh_hwid_resets":        "WEBHOOK_CUSTOMER_HWID_RESETS",
+        "wh_tickets_opened":     "WEBHOOK_CUSTOMER_TICKETS_OPENED",
+        "wh_tickets_closed":     "WEBHOOK_CUSTOMER_TICKETS_CLOSED",
+        "wh_ticket_transcripts": "WEBHOOK_CUSTOMER_TICKET_TRANSCRIPTS",
+        "wh_key_generated":      "WEBHOOK_CUSTOMER_KEY_GENERATED",
+        "wh_bans":               "WEBHOOK_CUSTOMER_BANS",
+        "log_webhook_url":       "LOG_WEBHOOK_URL (fallback)",
+    }
+    any_missing = False
+    for cfg_key, label in _WEBHOOK_STATUS.items():
+        val = CONFIG.get(cfg_key)
+        if val:
+            log.info("[webhooks] OK      %s", label)
+        else:
+            log.warning("[webhooks] MISSING %s", label)
+            any_missing = True
+    if any_missing:
+        log.warning("[webhooks] Some webhooks are not set. Ensure staff bot has run its startup setup and both services share the same Railway volume.")
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
@@ -1139,6 +1215,42 @@ async def lookup_cmd(interaction: discord.Interaction, user: discord.Member):
         f"{e('dot')} **HWID Resets Used** {row['hwid_resets']}"
     )
     await _reply_v2(interaction, text, color=0x5865F2)
+
+
+@bot.tree.command(name="test-logs", description="[Admin] Send a test message to every configured webhook.")
+@app_commands.checks.has_role(CONFIG["admin_role_id"])
+async def test_logs_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    results = []
+    test_keys = {
+        "wh_verifications":      "Verifications",
+        "wh_hwid_resets":        "HWID Resets",
+        "wh_tickets_opened":     "Tickets Opened",
+        "wh_tickets_closed":     "Tickets Closed",
+        "wh_ticket_transcripts": "Ticket Transcripts",
+        "wh_key_generated":      "Key Generated",
+        "wh_bans":               "Bans",
+        "log_webhook_url":       "Fallback Log",
+    }
+    for key, label in test_keys.items():
+        url = CONFIG.get(key)
+        if not url:
+            results.append(f"{e('cross')} **{label}** - not configured")
+            continue
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {"embeds": [{"title": f"Test - {label}", "description": f"Webhook test from `/test-logs` by {interaction.user}", "color": 0x5865F2}]}
+                async with session.post(url, json=payload) as resp:
+                    if resp.status in (200, 204):
+                        results.append(f"{e('verify')} **{label}** - OK")
+                    else:
+                        body = await resp.text()
+                        results.append(f"{e('cross')} **{label}** - HTTP {resp.status}: {body[:80]}")
+        except Exception as exc:
+            results.append(f"{e('warn')} **{label}** - error: {exc}")
+
+    text = "## Webhook Test Results\n\n" + "\n".join(results)
+    await interaction.followup.send(embed=_make_embed(text, 0x2b2d31), ephemeral=True)
 
 
 @bot.tree.command(name="close", description="[Admin] Force-close a ticket channel.")
