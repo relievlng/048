@@ -1,4 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Wrench - Setup -->
-  <path fill="white" d="M94,8 a30,30 0 0 0 -26,42 l-54,54 a10,10 0 0 0 0,14 l8,8 a10,10 0 0 0 14,0 l54,-54 a30,30 0 0 0 42,-26 a2,2 0 0 0 -4,0 l-10,10 l-14,-4 l-4,-14 l10,-10 a2,2 0 0 0 -16,-20 z"/>
+  <!-- Arrow shaft -->
+  <line x1="16" y1="64" x2="84" y2="64" stroke="white" stroke-width="14" stroke-linecap="round"/>
+  <!-- Arrowhead -->
+  <polyline points="62,36 96,64 62,92" fill="none" stroke="white" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

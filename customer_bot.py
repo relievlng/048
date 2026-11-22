@@ -511,30 +511,44 @@ def _rules_panel_payload() -> dict:
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
-    em_arrow = _emoji_in_text("arrow")
-    em_warn  = _emoji_in_text("warn")
-    bullet = f"{em_arrow} " if em_arrow else "- "
-    warn   = f"{em_warn} " if em_warn  else "! "
     body: list = []
     body.extend(_v2_banner())
+
     body.append({"type": 10, "content": (
-        "## Awaiting Setup?\n"
-        "Complete every step below, then wait for the Setup Team.\n\n"
-        f"{bullet}**Get Setup Pings** - Click the button below. Click again to remove.\n\n"
-        f"{bullet}**Open a Ticket** - Open a setup ticket in {ticket_ref}. "
-        "Your Invoice ID is in your DMs.\n\n"
-        f"{bullet}**Wait for the Team** - Check {alerts_ref} regularly. "
-        "Ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
-        f"{warn}Do **NOT** ping staff unless they have announced availability.\n\n"
-        "-# Failing to follow these steps may delay your setup."
+        "## ⚙️ Awaiting Setup?\n"
+        "Complete every step below, then wait for the Setup Team."
     )})
     body.append({"type": 14})
+
     body.append(_v2_section(
-        f"{em_arrow + ' ' if em_arrow else ''}Toggle setup pings - get notified when the team is available.",
+        "\U0001f514 **GET SETUP PINGS ROLE**\n"
+        "• Click the button to get the **@Setup Pings** role. Click again to remove it.",
         "Setup Pings",
         "setup_pings_toggle",
         btn_emoji_name="arrow",
     ))
+    body.append({"type": 14})
+
+    body.append({"type": 10, "content": (
+        f"\U0001f3ab **OPEN A SETUP TICKET**\n"
+        f"• Open a setup ticket here: {ticket_ref}\n"
+        "-# Your Invoice ID is in your DMs."
+    )})
+    body.append({"type": 14})
+
+    body.append({"type": 10, "content": (
+        f"\U0001f550 **WAIT FOR SETUP TEAM**\n"
+        f"• Check {alerts_ref} regularly.\n"
+        "• When a setup team member is available, ping them in your ticket **once** "
+        "with your **AnyDesk code & invoice ID**."
+    )})
+    body.append({"type": 14})
+
+    body.append({"type": 10, "content": (
+        "⚠️ **IMPORTANT**\n"
+        "• Do **NOT** ping staff unless they have announced they are available for setups."
+    )})
+
     return _v2_container(body)
 
 

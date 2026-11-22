@@ -1,6 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- X in circle - Close/Error -->
-  <circle fill="white" cx="64" cy="64" r="52"/>
-  <line x1="40" y1="40" x2="88" y2="88" stroke="#2b2d31" stroke-width="14" stroke-linecap="round"/>
-  <line x1="88" y1="40" x2="40" y2="88" stroke="#2b2d31" stroke-width="14" stroke-linecap="round"/>
+  <!-- Circle background -->
+  <circle cx="64" cy="64" r="54" fill="#ED4245"/>
+  <!-- Inner lighter ring for depth -->
+  <circle cx="64" cy="64" r="54" fill="none" stroke="#f56767" stroke-width="6" opacity="0.4"/>
+  <!-- X mark -->
+  <line x1="40" y1="40" x2="88" y2="88" stroke="white" stroke-width="14" stroke-linecap="round"/>
+  <line x1="88" y1="40" x2="40" y2="88" stroke="white" stroke-width="14" stroke-linecap="round"/>
 </svg>

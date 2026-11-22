@@ -1,5 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Shield with checkmark - Verify -->
-  <path fill="white" d="M64,8 L112,28 L112,64 C112,92 90,110 64,120 C38,110 16,92 16,64 L16,28 Z"/>
-  <polyline fill="none" stroke="#2b2d31" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" points="40,66 56,82 90,48"/>
+  <!-- Shield body -->
+  <path d="M64 10 L110 30 L110 68 C110 96 90 115 64 122 C38 115 18 96 18 68 L18 30 Z" fill="#57F287"/>
+  <!-- Inner shield highlight -->
+  <path d="M64 20 L104 38 L104 68 C104 92 86 109 64 115 C42 109 24 92 24 68 L24 38 Z" fill="#43c76e" opacity="0.35"/>
+  <!-- Checkmark -->
+  <polyline points="40,65 56,82 90,44" fill="none" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

@@ -1,5 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Crown - Management -->
-  <path fill="white" d="M12,96 L28,44 L52,68 L64,20 L76,68 L100,44 L116,96 Z"/>
-  <rect fill="white" x="12" y="98" width="104" height="18" rx="9"/>
+  <!-- Key bow (ring) -->
+  <circle cx="42" cy="52" r="24" fill="none" stroke="#FEE75C" stroke-width="12"/>
+  <!-- Key hole -->
+  <circle cx="42" cy="52" r="8" fill="#FEE75C" opacity="0.3"/>
+  <!-- Key shaft -->
+  <rect x="62" y="47" width="54" height="11" rx="5" fill="#FEE75C"/>
+  <!-- Tooth 1 -->
+  <rect x="82" y="58" width="10" height="18" rx="4" fill="#FEE75C"/>
+  <!-- Tooth 2 -->
+  <rect x="102" y="58" width="10" height="13" rx="4" fill="#FEE75C"/>
 </svg>

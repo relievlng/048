@@ -1,5 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Shopping bag - Purchase -->
-  <path fill="white" d="M42,32 a22,22 0 0 1 44,0 h16 a8,8 0 0 1 8,8 l-10,68 a8,8 0 0 1 -8,8 h-56 a8,8 0 0 1 -8,-8 l-10,-68 a8,8 0 0 1 8,-8 z"/>
-  <path fill="#2b2d31" d="M50,32 a14,14 0 0 1 28,0"/>
+  <!-- Shield outer body -->
+  <path d="M64 10 L112 30 L112 68 C112 97 92 115 64 122 C36 115 16 97 16 68 L16 30 Z" fill="#5865F2"/>
+  <!-- Shield inner highlight (top-left bevel) -->
+  <path d="M64 18 L106 36 L106 68 C104 90 90 108 70 116 L64 118 L58 116 C38 108 24 90 22 68 L22 36 Z" fill="#6675f5" opacity="0.3"/>
+  <!-- Center emblem - vertical bar + horizontal bar (badge cross) -->
+  <rect x="58" y="44" width="12" height="38" rx="5" fill="white" opacity="0.9"/>
+  <rect x="44" y="56" width="40" height="12" rx="5" fill="white" opacity="0.9"/>
 </svg>

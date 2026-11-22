@@ -1,6 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Speech bubble - Support -->
-  <path fill="white" d="M16,12 h96 a12,12 0 0 1 12,12 v56 a12,12 0 0 1 -12,12 h-36 l-24,24 v-24 h-36 a12,12 0 0 1 -12,-12 v-56 a12,12 0 0 1 12,-12 z"/>
-  <rect fill="#2b2d31" x="38" y="40" width="52" height="10" rx="5"/>
-  <rect fill="#2b2d31" x="38" y="58" width="36" height="10" rx="5"/>
+  <defs>
+    <mask id="tm">
+      <rect x="0" y="0" width="128" height="128" fill="white"/>
+      <circle cx="8" cy="64" r="11" fill="black"/>
+      <circle cx="120" cy="64" r="11" fill="black"/>
+    </mask>
+  </defs>
+  <!-- Ticket base -->
+  <rect x="8" y="34" width="112" height="60" rx="8" fill="#EB459E" mask="url(#tm)"/>
+  <!-- Stub shading -->
+  <rect x="8" y="34" width="38" height="60" rx="8" fill="#D2367A" mask="url(#tm)"/>
+  <!-- Perforation line -->
+  <line x1="46" y1="38" x2="46" y2="90" stroke="rgba(255,255,255,0.45)" stroke-width="2" stroke-dasharray="5,4"/>
+  <!-- Ticket lines on main body -->
+  <rect x="56" y="50" width="54" height="7" rx="3" fill="rgba(255,255,255,0.65)"/>
+  <rect x="56" y="64" width="38" height="7" rx="3" fill="rgba(255,255,255,0.45)"/>
+  <rect x="56" y="77" width="46" height="5" rx="2" fill="rgba(255,255,255,0.3)"/>
 </svg>
