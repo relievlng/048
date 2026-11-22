@@ -132,6 +132,9 @@ EMOJIS = {
     "arrow":   env("EMOJI_ARROW",   "<:arrow:EMOJI_ID>"),
     "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
     "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
+    "bell":    env("EMOJI_BELL",    "<:bell:EMOJI_ID>"),
+    "lock":    env("EMOJI_LOCK",    "<:lock:EMOJI_ID>"),
+    "gear":    env("EMOJI_GEAR",    "<:gear:EMOJI_ID>"),
 }
 
 def e(name: str) -> str:
@@ -423,91 +426,139 @@ def _emoji_in_text(key: str) -> str:
 
 
 def _ticket_panel_payload() -> dict:
+    em_ticket = _emoji_in_text("ticket")
+    ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f3ab "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Tickets\n"
-        "Choose a category. A private channel opens and staff meet you there."
+        f"## {ticket_pfx}Support Tickets\n"
+        "Select a category below to open a private support channel with staff."
     )})
     body.append({"type": 14})
+    first = True
     for cat_id, cat in TICKET_CATEGORIES.items():
+        if not first:
+            body.append({"type": 14})
+        first = False
         em = _emoji_in_text(cat["emoji_key"])
         prefix = f"{em} " if em else ""
         body.append(_v2_section(
-            f"{prefix}**{cat['label']}**\n-# {cat['desc']}",
+            f"{prefix}**{cat['label'].upper()}**\n• {cat['desc']}",
             cat["label"],
             f"ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
         ))
-    return _v2_container(body)
+    return _v2_container(body, accent=0x5865F2)
 
 
 def _verify_panel_payload() -> dict:
-    em = _emoji_in_text("verify")
-    prefix = f"{em} " if em else ""
+    em_lock   = _emoji_in_text("lock")
+    em_key    = _emoji_in_text("key")
+    em_verify = _emoji_in_text("verify")
+    lock_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
+    key_pfx    = f"{em_key} "    if em_key    else "\U0001f511 "
+    verify_pfx = f"{em_verify} " if em_verify else ""
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Verification\n"
-        "To access this server you need to verify your license key."
+        f"## {lock_pfx}Verification\n"
+        "Link your license key to unlock full access to this server."
+    )})
+    body.append({"type": 14})
+    body.append({"type": 10, "content": (
+        f"{key_pfx}**HOW IT WORKS**\n"
+        "• Your license key is linked permanently to your Discord account.\n"
+        "• One key per account - keys are non-transferable.\n"
+        "• Click the button below to begin verification."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{prefix}**Link your license key**\n"
-        "-# Your key is linked to your Discord account permanently. One key per account.",
+        f"{verify_pfx}**VERIFY YOUR LICENSE**\n"
+        "• Have your license key ready before clicking.",
         "Verify",
         "verify_button",
         btn_emoji_name="verify",
         btn_style=3,
     ))
-    return _v2_container(body)
+    return _v2_container(body, accent=0x57F287)
 
 
 def _hwid_panel_payload() -> dict:
-    em = _emoji_in_text("chip")
-    prefix = f"{em} " if em else ""
+    em_gear = _emoji_in_text("gear")
+    em_chip = _emoji_in_text("chip")
+    em_warn = _emoji_in_text("warn")
+    gear_pfx = f"{em_gear} " if em_gear else "⚙️ "
+    chip_pfx = f"{em_chip} " if em_chip else ""
+    warn_pfx = f"{em_warn} " if em_warn else "⚠️ "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## HWID Reset\n"
-        "Changed hardware or reinstalled Windows? Reset your HWID here."
+        f"## {gear_pfx}HWID Reset\n"
+        "Changed hardware or reinstalled Windows? Reset your hardware ID here."
+    )})
+    body.append({"type": 14})
+    body.append({"type": 10, "content": (
+        f"{warn_pfx}**BEFORE YOU RESET**\n"
+        "• You have a limited number of resets - use them wisely.\n"
+        "• HWID resets are logged and monitored by staff.\n"
+        "• Used all your resets? Open a support ticket instead."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{prefix}**Reset your hardware ID**\n"
-        "-# Limited resets available. Used all resets? Open a ticket instead.\n"
-        "-# HWID resets are logged and monitored.",
+        f"{chip_pfx}**RESET YOUR HARDWARE ID**\n"
+        "• Click the button to consume one of your available resets.",
         "Reset HWID",
         "hwid_reset_button",
         btn_emoji_name="chip",
     ))
-    return _v2_container(body)
+    return _v2_container(body, accent=0xFEE75C)
 
 
 def _rules_panel_payload() -> dict:
-    em = _emoji_in_text("dot")
-    prefix = f"{em} " if em else "- "
-    rules = [
-        ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
-        ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
-        ("No chargebacks",      "Initiating a chargeback voids your license immediately with no refund."),
-        ("No leaking",          "Do not share, leak, or redistribute any files or software from this server."),
-        ("No ban evasion",      "Attempting to bypass a ban results in a permanent blacklist."),
-        ("Use correct channels","Keep discussions in their respective channels."),
-        ("No advertising",      "Advertising other products or services without permission is not allowed."),
-        ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
+    em_rules  = _emoji_in_text("rules")
+    em_shield = _emoji_in_text("shield")
+    em_cross  = _emoji_in_text("cross")
+    em_dot    = _emoji_in_text("dot")
+    rules_pfx  = f"{em_rules} "  if em_rules  else "\U0001f4cb "
+    shield_pfx = f"{em_shield} " if em_shield else "\U0001f6e1️ "
+    cross_pfx  = f"{em_cross} "  if em_cross  else "❌ "
+    bullet     = f"{em_dot} "    if em_dot    else "• "
+
+    conduct = [
+        ("Respect everyone",     "Harassment, discrimination, and toxicity are not tolerated."),
+        ("No advertising",       "Advertising other products or services without permission is not allowed."),
+        ("Use correct channels", "Keep discussions in their respective channels."),
     ]
-    rule_lines = "\n".join(f"{prefix}**{n}** - {v}" for n, v in rules)
+    license_rules = [
+        ("No sharing keys", "License keys are non-transferable. Sharing a key results in a permanent ban."),
+        ("No chargebacks",  "Initiating a chargeback voids your license immediately with no refund."),
+        ("No leaking",      "Do not share, leak, or redistribute any files or software from this server."),
+    ]
+    enforcement = [
+        ("No ban evasion",    "Attempting to bypass a ban results in a permanent blacklist."),
+        ("Follow Discord ToS","All Discord Terms of Service rules apply at all times."),
+    ]
+
+    def rule_block(pfx: str, header: str, items: list) -> dict:
+        lines = "\n".join(f"{bullet}**{n}** - {v}" for n, v in items)
+        return {"type": 10, "content": f"{pfx}**{header}**\n{lines}"}
+
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Server Rules\n"
+        f"## {rules_pfx}Server Rules\n"
         "By being in this server you agree to the following rules. "
-        "Violations may result in removal or key termination.\n\n"
-        f"{rule_lines}\n\n"
-        "-# Last updated by staff"
+        "Violations may result in removal or key termination."
     )})
-    return _v2_container(body)
+    body.append({"type": 14})
+    body.append(rule_block(shield_pfx, "CONDUCT", conduct))
+    body.append({"type": 14})
+    body.append(rule_block(cross_pfx, "LICENSES & PAYMENTS", license_rules))
+    body.append({"type": 14})
+    body.append(rule_block(shield_pfx, "ENFORCEMENT", enforcement))
+    body.append({"type": 14})
+    body.append({"type": 10, "content": "-# Last updated by staff"})
+    return _v2_container(body, accent=0xED4245)
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
@@ -690,6 +741,9 @@ _EMOJI_FILE_MAP = {
     "arrow":   "arrow",
     "warn":    "warning",
     "dot":     "dot",
+    "bell":    "bell",
+    "lock":    "lock",
+    "gear":    "gear",
 }
 
 async def _setup_emojis(guild: discord.Guild) -> None:
