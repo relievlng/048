@@ -520,33 +520,10 @@ def _hwid_panel_payload() -> dict:
 
 
 def _rules_panel_payload() -> dict:
-    em_rules  = _emoji_in_text("rules")
-    em_shield = _emoji_in_text("shield")
-    em_cross  = _emoji_in_text("cross")
-    em_dot    = _emoji_in_text("dot")
-    rules_pfx  = f"{em_rules} "  if em_rules  else "\U0001f4cb "
-    shield_pfx = f"{em_shield} " if em_shield else "\U0001f6e1️ "
-    cross_pfx  = f"{em_cross} "  if em_cross  else "❌ "
-    bullet     = f"{em_dot} "    if em_dot    else "• "
-
-    conduct = [
-        ("Respect everyone",     "Harassment, discrimination, and toxicity are not tolerated."),
-        ("No advertising",       "Advertising other products or services without permission is not allowed."),
-        ("Use correct channels", "Keep discussions in their respective channels."),
-    ]
-    license_rules = [
-        ("No sharing keys", "License keys are non-transferable. Sharing a key results in a permanent ban."),
-        ("No chargebacks",  "Initiating a chargeback voids your license immediately with no refund."),
-        ("No leaking",      "Do not share, leak, or redistribute any files or software from this server."),
-    ]
-    enforcement = [
-        ("No ban evasion",    "Attempting to bypass a ban results in a permanent blacklist."),
-        ("Follow Discord ToS","All Discord Terms of Service rules apply at all times."),
-    ]
-
-    def rule_block(pfx: str, header: str, items: list) -> dict:
-        lines = "\n".join(f"{bullet}**{n}** - {v}" for n, v in items)
-        return {"type": 10, "content": f"{pfx}**{header}**\n{lines}"}
+    em_rules = _emoji_in_text("rules")
+    em_dot   = _emoji_in_text("dot")
+    rules_pfx = f"{em_rules} " if em_rules else "\U0001f4cb "
+    bullet    = f"{em_dot} "   if em_dot   else "• "
 
     body: list = []
     body.extend(_v2_banner())
@@ -556,11 +533,25 @@ def _rules_panel_payload() -> dict:
         "Violations may result in removal or key termination."
     )})
     body.append({"type": 14})
-    body.append(rule_block(shield_pfx, "CONDUCT", conduct))
+    body.append({"type": 10, "content": (
+        "**CONDUCT:**\n"
+        f"{bullet}**Respect everyone** - Harassment, discrimination, and toxicity are not tolerated.\n"
+        f"{bullet}**No advertising** - Advertising other products or services without permission is not allowed.\n"
+        f"{bullet}**Use correct channels** - Keep discussions in their respective channels."
+    )})
     body.append({"type": 14})
-    body.append(rule_block(cross_pfx, "LICENSES & PAYMENTS", license_rules))
+    body.append({"type": 10, "content": (
+        "**LICENSES & PAYMENTS:**\n"
+        f"{bullet}**No sharing keys** - License keys are non-transferable. Sharing a key results in a permanent ban.\n"
+        f"{bullet}**No chargebacks** - Initiating a chargeback voids your license immediately with no refund.\n"
+        f"{bullet}**No leaking** - Do not share, leak, or redistribute any files or software from this server."
+    )})
     body.append({"type": 14})
-    body.append(rule_block(shield_pfx, "ENFORCEMENT", enforcement))
+    body.append({"type": 10, "content": (
+        "**ENFORCEMENT:**\n"
+        f"{bullet}**No ban evasion** - Attempting to bypass a ban results in a permanent blacklist.\n"
+        f"{bullet}**Follow Discord ToS** - All Discord Terms of Service rules apply at all times."
+    )})
     body.append({"type": 14})
     body.append({"type": 10, "content": "-# Last updated by staff"})
     return _v2_container(body, accent=0xED4245)
