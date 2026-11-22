@@ -54,6 +54,8 @@ CONFIG = {
     "key_prefix":           env("VOID_KEY_PREFIX", "VD"),
 }
 
+BRAND_COLOR = 0x9B59B6  # Void brand purple
+
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -462,7 +464,7 @@ def _ticket_panel_payload() -> dict:
             f"void_ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
         ))
-    return _v2_container(body, accent=0x5865F2)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _product_panel_payload(product_id: str) -> dict:
@@ -578,7 +580,7 @@ def _payment_panel_payload() -> dict:
     body.append({"type": 10, "content": (
         "Have a question about another payment method? Open a support ticket."
     )})
-    return _v2_container(body, accent=0x57F287)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _verify_panel_payload() -> dict:
@@ -595,25 +597,25 @@ def _verify_panel_payload() -> dict:
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Click the button below to unlock access to the server."
+        "Confirm your purchase to unlock full access to the server."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}After purchase, your Discord account is linked to your order.\n"
-        f"{bullet}Click Verify and complete the quick spam check.\n"
-        f"{bullet}You can re-verify at any time if you lose your role."
+        f"{bullet}Your Discord account is automatically linked when you buy.\n"
+        f"{bullet}Hit Verify and answer one quick question to prove you're human.\n"
+        f"{bullet}Lost your role? Click Verify again at any time."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
-        f"{bullet}Just click the button - no Invoice ID needed.",
+        f"{verify_pfx}**READY TO VERIFY?**\n"
+        f"{bullet}No Invoice ID or key needed - just click the button.",
         "Verify",
         "void_verify_button",
         btn_emoji_name="verify",
         btn_style=3,
     ))
-    return _v2_container(body, accent=0x57F287)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _changelog_payload(product_ref: str, date: str, added: str, removed: str) -> dict:
@@ -637,7 +639,7 @@ def _changelog_payload(product_ref: str, date: str, added: str, removed: str) ->
         body.append({"type": 10, "content": f"**Removed:**\n```ansi\n{removed_lines}\n```"})
     body.append({"type": 14})
     body.append({"type": 10, "content": "-# Review and share feedback in the appropriate channel."})
-    return _v2_container(body, accent=0x5865F2)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 
@@ -746,7 +748,7 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
             f"{bullet}Use the **Close** button when resolved."
         )})
 
-        payload = _v2_container(body, accent=0x5865F2)
+        payload = _v2_container(body, accent=BRAND_COLOR)
         await _post_channel_v2(channel, payload)
 
         # Ping the user and staff role, then post control buttons
@@ -938,7 +940,7 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
                     "Your payment has been received. Use your Invoice ID to verify "
                     "in the customer Discord and gain access."
                 ),
-                color=0x2B2D31,
+                color=BRAND_COLOR,
             )
             dm_embed.add_field(name="Product",   value=f"`{prod}`", inline=True)
             dm_embed.add_field(name="Valid For", value=exp_label,   inline=True)

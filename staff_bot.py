@@ -197,12 +197,14 @@ def ok_embed(title: str, desc: str = None) -> discord.Embed:
 def warn_embed(title: str, desc: str) -> discord.Embed:
     return discord.Embed(title=title, description=desc, color=discord.Color.orange())
 
+BRAND_COLOR = discord.Color(0x9B59B6)  # Staff brand purple
+
 TICKET_COLORS = {
     "hwid_free":  discord.Color.blue(),
     "hwid_paid":  discord.Color.gold(),
     "fac_free":   discord.Color.purple(),
     "fac_paid":   discord.Color.gold(),
-    "general":    discord.Color.blurple(),
+    "general":    BRAND_COLOR,
 }
 
 TICKET_LABELS = {
@@ -351,9 +353,18 @@ class StaffBot(discord.Client):
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.CheckFailure):
+            # Predicate sends "Access Denied" itself; safety net if it couldn't respond
+            try:
+                e = err_embed("Access Denied", "You don't have permission to use this command.")
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=e, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=e, ephemeral=True)
+            except Exception:
+                pass
             return
         log.error("Command error /%s: %s", interaction.command.name if interaction.command else "?", error)
-        e = err_embed("Something went wrong", "An internal error occurred.")
+        e = err_embed("Something went wrong", "An internal error occurred. Contact staff if this persists.")
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(embed=e, ephemeral=True)
@@ -484,7 +495,7 @@ class TicketTypeSelect(discord.ui.Select):
 
         # Build opening embed in ticket channel
         needs_payment = ticket_type in ("hwid_paid", "fac_paid")
-        color = TICKET_COLORS.get(ticket_type, discord.Color.blurple())
+        color = TICKET_COLORS.get(ticket_type, BRAND_COLOR)
 
         e = discord.Embed(
             title=f"Ticket - {TICKET_LABELS[ticket_type]}",
@@ -997,7 +1008,7 @@ async def cmd_keygen(i: discord.Interaction,
         dm_embed = discord.Embed(
             title="Your License Key",
             description="Your key is ready. Open the loader and enter it to activate your license.",
-            color=discord.Color.from_rgb(32, 34, 37),
+            color=BRAND_COLOR,
         )
         dm_embed.add_field(name="Key", value=f"```{k}```", inline=False)
         dm_embed.add_field(name="Product", value=f"{prod_icon} {prod}", inline=True)
@@ -1329,7 +1340,7 @@ async def cmd_revoke(i: discord.Interaction, user: discord.User, reason: Optiona
     e = discord.Embed(
         title="License Revoked",
         description="License permanently revoked. Verified role removed.",
-        color=discord.Color.dark_gray()
+        color=BRAND_COLOR
     )
     e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
     e.add_field(name="Reason", value=reason or "No reason given", inline=True)
@@ -1354,7 +1365,7 @@ async def cmd_addnote(i: discord.Interaction, user: discord.User, note: str):
     DB.execute("UPDATE users SET notes=? WHERE discord_id=?", ((existing + "\n" + stamp).strip(), did))
     DB.commit()
     audit("ADD_NOTE", actor_id=str(i.user.id), target_id=did, detail=note[:100])
-    e = discord.Embed(title="Note Added", description=f"```{note[:300]}```", color=discord.Color.blurple())
+    e = discord.Embed(title="Note Added", description=f"```{note[:300]}```", color=BRAND_COLOR)
     e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=True)
     e.add_field(name="Added By", value=str(i.user), inline=True)
     e.set_footer(text=ts())
@@ -1470,7 +1481,7 @@ async def cmd_setproduct(i: discord.Interaction, user: discord.User, product: st
     DB.commit()
     audit("SET_PRODUCT", actor_id=str(i.user.id), target_id=did, detail=f"product={product}")
     prod_icon = "🌐" if product == "public" else "🔒"
-    e = discord.Embed(title="Product Updated", description="Tier change takes effect on next loader launch.", color=discord.Color.blurple())
+    e = discord.Embed(title="Product Updated", description="Tier change takes effect on next loader launch.", color=BRAND_COLOR)
     e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=True)
     e.add_field(name="New Product", value=f"{prod_icon} `{product}`", inline=True)
     e.add_field(name="Updated By", value=str(i.user), inline=True)
@@ -1498,7 +1509,7 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.User, count: int
     e = discord.Embed(
         title="HWID Resets Updated",
         description=f"Counter adjusted by `{count:+d}`. User now has `{slots_left}` reset slot(s) remaining.",
-        color=discord.Color.blurple()
+        color=BRAND_COLOR
     )
     e.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=True)
     e.add_field(name="Counter", value=f"`{old_val}` -> `{new_val}`", inline=True)
@@ -1726,7 +1737,7 @@ async def cmd_listusers(i: discord.Interaction,
     if product: filters.append(f"product: {product}")
     desc = ("Filters: " + ", ".join(filters) + "\n\n") if filters else ""
     desc += "\n".join(lines)
-    e = discord.Embed(title="Registered Users", description=desc, color=discord.Color.blurple())
+    e = discord.Embed(title="Registered Users", description=desc, color=BRAND_COLOR)
     e.set_footer(text=f"{len(rows)} result(s) shown - {ts()}")
     await i.followup.send(embed=e, ephemeral=True)
 
@@ -1752,7 +1763,7 @@ async def cmd_listkeys(i: discord.Interaction,
         vis_icon = "🌐" if r["visibility"] == "public" else "🔒"
         lines.append(f"{vis_icon} `{r['key']}` - {r['product']} - expires {fmt_dt(r['expires_at'])}")
     desc = (f"Filtered to product: `{product}`\n\n" if product else "") + "\n".join(lines)
-    e = discord.Embed(title="Key Pool", description=desc, color=discord.Color.blurple())
+    e = discord.Embed(title="Key Pool", description=desc, color=BRAND_COLOR)
     e.set_footer(text=f"{len(rows)} unclaimed key(s) shown - {ts()}")
     await i.followup.send(embed=e, ephemeral=True)
 
@@ -1806,7 +1817,7 @@ async def cmd_auditlog(i: discord.Interaction,
     if action: filters.append(f"action: {action}")
     desc = ("Filters: " + ", ".join(filters) + "\n\n") if filters else ""
     desc += "```\n" + "\n".join(lines) + "\n```"
-    e = discord.Embed(title="Audit Log", description=desc, color=discord.Color.dark_gray())
+    e = discord.Embed(title="Audit Log", description=desc, color=BRAND_COLOR)
     e.set_footer(text=f"{len(rows)} entries shown - {ts()}")
     await i.followup.send(embed=e, ephemeral=True)
 
@@ -1832,7 +1843,7 @@ async def cmd_stats(i: discord.Interaction):
         "SELECT COUNT(*) FROM audit_log WHERE action='REGISTER_SUCCESS' AND timestamp LIKE ?",
         (today + "%",)
     ).fetchone()[0]
-    e = discord.Embed(title="System Overview", description="Live snapshot of all license, key, and activity data.", color=discord.Color.blurple())
+    e = discord.Embed(title="System Overview", description="Live snapshot of all license, key, and activity data.", color=BRAND_COLOR)
     e.add_field(name="Total Users",          value=str(total),         inline=True)
     e.add_field(name="Active",               value=str(active),        inline=True)
     e.add_field(name="Banned",               value=str(banned),        inline=True)
@@ -1966,7 +1977,7 @@ async def cmd_invite(i: discord.Interaction):
         use_application_commands=True,
     )
     url = discord.utils.oauth_url(BOT.user.id, permissions=perms)
-    e = discord.Embed(title="Bot Invite", description="Use this link to add the bot to another server.", color=discord.Color.blurple())
+    e = discord.Embed(title="Bot Invite", description="Use this link to add the bot to another server.", color=BRAND_COLOR)
     e.add_field(name="Invite Link", value=url, inline=False)
     e.add_field(name="Permissions", value="Send Messages, Manage Roles, Read Messages, Slash Commands", inline=False)
     await i.followup.send(embed=e, ephemeral=True)
@@ -2049,7 +2060,7 @@ async def cmd_test(i: discord.Interaction,
     ip_banned   = bool(DB.execute("SELECT 1 FROM hwid_bans WHERE hwid=?", (f"IP:{ip}",)).fetchone())
 
     prod_icon = PRODUCT_ICONS.get(row["product"], "🔑")
-    e1 = discord.Embed(title=f"Simulated: {event}", description="Event fired. Check the main bot's loader log channel for loader-side embeds.", color=discord.Color.blurple())
+    e1 = discord.Embed(title=f"Simulated: {event}", description="Event fired. Check the main bot's loader log channel for loader-side embeds.", color=BRAND_COLOR)
     e1.add_field(name="User", value=f"<@{did}> (`{did}`)", inline=False)
     e1.add_field(name="Simulated IP", value=f"`{ip}`", inline=True)
     e1.add_field(name="HWID", value=f"`{real_hwid_hash[:16]}...`", inline=True)
@@ -2078,9 +2089,9 @@ async def cmd_test(i: discord.Interaction,
         for r in recent_logs:
             stamp = r["timestamp"][:16].replace("T", " ")
             log_lines.append(f"[{stamp}] {r['status']:20s} {r['ip']}")
-        e3 = discord.Embed(title="Recent Login Log", description="```\n" + "\n".join(log_lines) + "\n```", color=discord.Color.dark_gray())
+        e3 = discord.Embed(title="Recent Login Log", description="```\n" + "\n".join(log_lines) + "\n```", color=BRAND_COLOR)
     else:
-        e3 = discord.Embed(title="Recent Login Log", description="No login entries recorded yet.", color=discord.Color.dark_gray())
+        e3 = discord.Embed(title="Recent Login Log", description="No login entries recorded yet.", color=BRAND_COLOR)
     e3.set_footer(text=f"Showing last {len(recent_logs)} of {total_all} entries")
 
     await i.followup.send(embeds=[e1, e2, e3], ephemeral=True)
@@ -2197,7 +2208,7 @@ async def cmd_panel(i: discord.Interaction, channel: Optional[discord.TextChanne
             "**General** - Any other question or issue.\n\n"
             "Free tickets are handled case by case. Paid tickets require payment before processing."
         ),
-        color=discord.Color.blurple()
+        color=BRAND_COLOR
     )
     e.set_footer(text="048 Support System")
     await target.send(embed=e, view=TicketTypeView())
@@ -2224,7 +2235,7 @@ async def cmd_ticketlookup(i: discord.Interaction, query: str):
     e = discord.Embed(
         title="License Lookup (Staff)",
         description=f"<@{did}> (`{did}`)",
-        color=discord.Color.blurple()
+        color=BRAND_COLOR
     )
     e.add_field(name="Status",      value=row["status"].upper(),                   inline=True)
     e.add_field(name="Product",     value=row["product"],                          inline=True)
@@ -2265,7 +2276,7 @@ async def cmd_tickets(i: discord.Interaction, status: str = "open"):
     e = discord.Embed(
         title=f"Tickets - {status.title()} ({len(rows)})",
         description="\n".join(lines),
-        color=discord.Color.blurple()
+        color=BRAND_COLOR
     )
     e.set_footer(text=ts())
     await i.followup.send(embed=e, ephemeral=True)

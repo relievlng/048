@@ -306,7 +306,9 @@ def start_health_server(port: int):
 # Regular channel/interaction sends use discord.Embed; Components v2 JSON
 # is used only for log webhooks (sent via raw aiohttp in send_log).
 
-def _make_embed(text: str, color: int = 0x2b2d31) -> discord.Embed:
+BRAND_COLOR = 0x3B82F6  # Customer brand blue
+
+def _make_embed(text: str, color: int = BRAND_COLOR) -> discord.Embed:
     """Convert markdown-formatted panel text into a discord.Embed.
     The first '## Heading' line becomes the embed title; the rest is description.
     If LOGO_URL is set, the logo appears as a thumbnail in the top-right corner."""
@@ -1565,7 +1567,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
     await send_log(
         title=f"Transcript - {channel.name}",
         description=f"```\n{preview[:1800]}\n```",
-        color=0x5865F2,
+        color=BRAND_COLOR,
         webhook_key="wh_ticket_transcripts",
         fields=[
             {"name": "Ticket",         "value": f"#{ticket_num_str}",  "inline": True},
@@ -1900,7 +1902,7 @@ async def key_cmd(interaction: discord.Interaction):
         f"{e('chip')} **HWID Bound** {'Yes' if hwid_used else 'No'}\n"
         f"{e('dot')} **Resets Remaining** {resets_left}"
     )
-    await _reply_v2(interaction, text, color=0x2b2d31)
+    await _reply_v2(interaction, text, color=BRAND_COLOR)
 
 
 @bot.tree.command(name="hwid-reset", description="Reset your HWID (limited uses).")
@@ -1971,7 +1973,7 @@ async def lookup_cmd(interaction: discord.Interaction, user: discord.Member):
         f"{e('chip')} **HWID** {hwid_val}\n"
         f"{e('dot')} **HWID Resets Used** {row['hwid_resets']}"
     )
-    await _reply_v2(interaction, text, color=0x5865F2)
+    await _reply_v2(interaction, text, color=BRAND_COLOR)
 
 
 @bot.tree.command(name="test-logs", description="[Admin] Send a test message to every configured webhook.")
