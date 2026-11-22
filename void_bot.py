@@ -913,17 +913,16 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
             dm_embed = discord.Embed(
                 title=f"Payment Confirmed - {CONFIG.get('brand_name', 'Void')}",
                 description=(
-                    "Your payment has been received and your license is ready. "
-                    "Use it in the loader to activate access."
+                    "Your payment has been received. Use your Invoice ID to verify "
+                    "in the customer Discord and gain access."
                 ),
                 color=0x2B2D31,
             )
-            dm_embed.add_field(name="Invoice ID", value=f"`{invoice_id}`", inline=True)
-            dm_embed.add_field(name="Product",    value=f"`{prod}`",       inline=True)
-            dm_embed.add_field(name="Valid For",  value=exp_label,         inline=True)
-            dm_embed.add_field(name="License Key", value=f"```\n{key}\n```", inline=False)
+            dm_embed.add_field(name="Product",   value=f"`{prod}`", inline=True)
+            dm_embed.add_field(name="Valid For", value=exp_label,   inline=True)
+            dm_embed.add_field(name="Invoice ID", value=f"```\n{invoice_id}\n```", inline=False)
             dm_embed.set_footer(
-                text="Keep your key private. Do not share it with anyone."
+                text="Use this Invoice ID to verify in the customer Discord."
             )
             await user_obj.send(embed=dm_embed)
             dm_sent = True
