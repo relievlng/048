@@ -535,10 +535,10 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":  {"label": "Support",           "emoji_key": "ticket",  "desc": "Product support or general enquiries"},
-    "setup":    {"label": "Setup",             "emoji_key": "arrow",   "desc": "First time setup and installation"},
-    "billing":  {"label": "Billing",           "emoji_key": "shield",  "desc": "Purchases, renewals and refunds"},
-    "key":      {"label": "Key / HWID Issues", "emoji_key": "key",     "desc": "Key problems and HWID resets"},
+    "support":    {"label": "Support",            "emoji_key": "ticket",  "desc": "Product support or general enquiries"},
+    "setup":      {"label": "Setup",              "emoji_key": "arrow",   "desc": "First time setup"},
+    "purchase":   {"label": "Purchase / Renewal", "emoji_key": "shield",  "desc": "Purchase or renew"},
+    "management": {"label": "Management",         "emoji_key": "key",     "desc": "Management help"},
 }
 
 class TicketPanelView(discord.ui.View):
