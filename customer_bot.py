@@ -11,6 +11,7 @@ import sqlite3
 import logging
 import asyncio
 import aiohttp
+import json
 import os
 import re
 import io
@@ -217,10 +218,13 @@ async def send_log(
     webhook_key: str = "log_webhook_url",
     thumbnail_url: str = None,
     footer: str = None,
+    attachment_bytes: bytes = None,
+    attachment_filename: str = None,
 ):
     """
     Send an embed log to the appropriate staff Discord channel via webhook.
     Uses standard Discord embed format (webhooks don't support Components v2).
+    Pass attachment_bytes + attachment_filename to upload a file alongside the embed.
     """
     _refresh_webhook_config()
     url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
@@ -248,10 +252,31 @@ async def send_log(
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status not in (200, 204):
-                    body = await resp.text()
-                    log.warning("send_log webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
+            if attachment_bytes and attachment_filename:
+                # Multipart: embed JSON + file attachment in one request
+                form = aiohttp.FormData()
+                form.add_field(
+                    "payload_json",
+                    json.dumps(payload),
+                    content_type="application/json",
+                )
+                ext = attachment_filename.rsplit(".", 1)[-1].lower()
+                mime = "text/html" if ext == "html" else "text/plain"
+                form.add_field(
+                    "files[0]",
+                    attachment_bytes,
+                    filename=attachment_filename,
+                    content_type=mime,
+                )
+                async with session.post(url, data=form) as resp:
+                    if resp.status not in (200, 204):
+                        body = await resp.text()
+                        log.warning("send_log(+file) webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
+            else:
+                async with session.post(url, json=payload) as resp:
+                    if resp.status not in (200, 204):
+                        body = await resp.text()
+                        log.warning("send_log webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
     except Exception as exc:
         log.warning("send_log failed for key=%s: %s", webhook_key, exc)
 
@@ -1380,21 +1405,25 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
         footer=f"User ID: {uid_match.group(1) if uid_match else 'Unknown'}",
     )
 
-    # --- Transcript log - preview only, HTML in DM ---
+    # --- Transcript log - preview in embed + full HTML attached to same message ---
     preview_lines = user_msgs_txt[-15:] if user_msgs_txt else ["No user messages in this ticket."]
     preview       = "\n".join(preview_lines)
+    html_bytes    = html_transcript.encode("utf-8")
     await send_log(
         title=f"Transcript - {channel.name}",
         description=f"```\n{preview[:1800]}\n```",
         color=0x5865F2,
         webhook_key="wh_ticket_transcripts",
         fields=[
-            {"name": "Ticket",         "value": f"#{ticket_num_str}", "inline": True},
-            {"name": "Total Messages", "value": str(total_count),      "inline": True},
-            {"name": "User Messages",  "value": str(user_count),       "inline": True},
-            {"name": "Full Transcript","value": "HTML file sent via DM to opener", "inline": False},
+            {"name": "Ticket",         "value": f"#{ticket_num_str}",  "inline": True},
+            {"name": "Category",       "value": cat_label,              "inline": True},
+            {"name": "Duration",       "value": duration_str,           "inline": True},
+            {"name": "Total Messages", "value": str(total_count),       "inline": True},
+            {"name": "User Messages",  "value": str(user_count),        "inline": True},
         ],
-        footer=f"Category: {cat_label}",
+        footer=f"Full transcript attached above",
+        attachment_bytes=html_bytes,
+        attachment_filename=f"transcript-{channel.name}.html",
     )
 
     # --- DM opener with HTML transcript file ---
