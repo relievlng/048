@@ -522,37 +522,89 @@ def _hwid_panel_payload() -> dict:
 def _rules_panel_payload() -> dict:
     em_rules = _emoji_in_text("rules")
     em_dot   = _emoji_in_text("dot")
+    em_cross = _emoji_in_text("cross")
+    em_warn  = _emoji_in_text("warn")
     rules_pfx = f"{em_rules} " if em_rules else "\U0001f4cb "
     bullet    = f"{em_dot} "   if em_dot   else "• "
+    cross_pfx = f"{em_cross} " if em_cross else "❌ "
+    warn_pfx  = f"{em_warn} "  if em_warn  else "⚠️ "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {rules_pfx}Server Rules\n"
-        "By being in this server you agree to the following rules. "
-        "Violations may result in removal or key termination."
+        "By being in this server and using our software, you agree to the following rules. "
+        "Violations may result in key termination or permanent blacklisting."
     )})
     body.append({"type": 14})
+
     body.append({"type": 10, "content": (
-        "**CONDUCT:**\n"
-        f"{bullet}**Respect everyone** - Harassment, discrimination, and toxicity are not tolerated.\n"
-        f"{bullet}**No advertising** - Advertising other products or services without permission is not allowed.\n"
-        f"{bullet}**Use correct channels** - Keep discussions in their respective channels."
+        "**RULES & TERMS:**\n"
+        "All rules from our main terms of service apply here to all customers. "
+        "Using our software means you agree to all terms.\n\n"
+        "**SHARING INFORMATION:**\n"
+        "Do not share our software, procedures, or member information, including:\n"
+        f"{bullet}Loader photos / videos\n"
+        f"{bullet}Injection methods or instructions\n"
+        f"{bullet}Backdooring users, or helping staff/devs detect features\n"
+        f"{bullet}Recording setups, or screenshotting / screensharing this server"
     )})
     body.append({"type": 14})
+
     body.append({"type": 10, "content": (
-        "**LICENSES & PAYMENTS:**\n"
-        f"{bullet}**No sharing keys** - License keys are non-transferable. Sharing a key results in a permanent ban.\n"
-        f"{bullet}**No chargebacks** - Initiating a chargeback voids your license immediately with no refund.\n"
-        f"{bullet}**No leaking** - Do not share, leak, or redistribute any files or software from this server."
+        "**INVITES & VOUCHES:**\n"
+        "Group owners — you are responsible for your group's TOS violations (may deactivate access).\n"
+        "You are responsible for anyone you vouch for or invite to this server.\n\n"
+        "**ACCOUNT & SERVER ACCESS:**\n"
+        "Lost account access may mean no re-invite. Keep your account secure. "
+        "Token-logged spam accounts are banned instantly and may need a new key.\n\n"
+        "**PAUSING KEYS:**\n"
+        "To pause your key, open a ticket and speak to staff. Pauses last up to 2 weeks, "
+        "then resume automatically. Respect staff - they are not 24/7. Disrespect may "
+        "result in a timeout or ban. Serious issues: report to management."
     )})
     body.append({"type": 14})
+
     body.append({"type": 10, "content": (
-        "**ENFORCEMENT:**\n"
-        f"{bullet}**No ban evasion** - Attempting to bypass a ban results in a permanent blacklist.\n"
-        f"{bullet}**Follow Discord ToS** - All Discord Terms of Service rules apply at all times."
+        "**MULTI SOFTWARE POLICY:**\n"
+        "Using or affiliating with any other cheat / bypass while using our software is prohibited. "
+        "Caught using or promoting another product → key terminated, no refund.\n"
+        f"{bullet}Includes other Discord tags, vanities in your profile, etc.\n\n"
+        "**PC CHECKING:**\n"
+        "No PC checking of any kind:\n"
+        f"{bullet}Self scanning · scanning friends · general server PC checks\n\n"
+        "**REPORTING:**\n"
+        "Knowing about a TOS / rule breach and not reporting it can get you punished too - "
+        "friends breaking rules, leaks, suspicious DMs/solicits, or anything that harms the community.\n\n"
+        "**DISRESPECT TO OTHER PRODUCTS:**\n"
+        f"Insults or attacks toward other software providers are banned. "
+        f"{cross_pfx}**Immediate key termination. ZERO TOLERANCE.**"
     )})
     body.append({"type": 14})
+
+    body.append({"type": 10, "content": (
+        "**RESETUPS:**\n"
+        "Resetups are free UNLESS you:\n"
+        f"{bullet}Destruct without PC check proof\n"
+        f"{bullet}Break or disable something yourself\n"
+        f"{bullet}Factory reset without approval or valid proof\n\n"
+        "**Factory resets require** a ticket, valid proof, and staff approval.\n\n"
+        "**PC Checks** - ensure you have clear proof of your PC check:\n"
+        f"{bullet}Screenshot/VOD of scan or ban\n"
+        f"{bullet}Visible PC checker roles\n"
+        f"{bullet}Date and time included\n\n"
+        "Violations incur a **$10 setup fee**. Repeated offences may result in blacklisting."
+    )})
+    body.append({"type": 14})
+
+    body.append({"type": 10, "content": (
+        f"{warn_pfx}**DISCLOSURE:**\n"
+        "Failure to comply with these rules or failure to report a rule break to management will lead to:\n"
+        f"{bullet}Permanent blacklisting from our services without refund.\n"
+        f"{bullet}Further punishment to the user/s who vouched / invited you."
+    )})
+    body.append({"type": 14})
+
     body.append({"type": 10, "content": "-# Last updated by staff"})
     return _v2_container(body, accent=0xED4245)
 
