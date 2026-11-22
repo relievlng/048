@@ -358,32 +358,31 @@ def _ticket_panel_payload() -> dict:
 
 
 def _product_panel_payload(product_id: str) -> dict:
-    p       = PRODUCTS[product_id]
-    brand   = CONFIG.get("brand_name", "Void")
-    em_dot  = _emoji_in_text("dot")
-    em_warn = _emoji_in_text("warn")
-    em_lock = _emoji_in_text("lock")
-    em_key  = _emoji_in_text("key")
-    bullet  = f"{em_dot} "  if em_dot  else "- "
-    warn    = f"{em_warn} " if em_warn else "⚠️ "
-    lock    = f"{em_lock} " if em_lock else "\U0001f512 "
+    p        = PRODUCTS[product_id]
+    brand    = CONFIG.get("brand_name", "Void")
+    em_dot   = _emoji_in_text("dot")
+    em_warn  = _emoji_in_text("warn")
+    em_lock  = _emoji_in_text("lock")
+    em_key   = _emoji_in_text("key")
+    em_prod  = _emoji_in_text(p["emoji_key"])
+    bullet   = f"{em_dot} "   if em_dot   else "- "
+    warn_pfx = f"{em_warn} "  if em_warn  else "⚠️ "
+    lock_pfx = f"{em_lock} "  if em_lock  else "\U0001f512 "
+    key_pfx  = f"{em_key} "   if em_key   else "\U0001f511 "
+    prod_pfx = f"{em_prod} "  if em_prod  else ""
 
-    # Header block: product name + tag line
-    header_content = (
-        f"## {p['label']}\n"
-        f"-# {brand.upper()} - {p['tag']}\n\n"
-        f"{p['desc']}"
-    )
+    # Header: emoji inline with ## heading, brand tag as subtext
+    header_txt = f"## {prod_pfx}{p['label']}\n-# {brand.upper()} - {p['tag']}"
 
     body: list = []
     body.extend(_v2_banner())
 
-    # Header - with thumbnail if image URL is set
+    # Header block - with thumbnail if image URL is set
     img = p.get("image_url", "")
     if img:
         body.append({
             "type": 9,
-            "components": [{"type": 10, "content": header_content}],
+            "components": [{"type": 10, "content": header_txt}],
             "accessory": {
                 "type": 11,
                 "media": {"url": img},
@@ -391,37 +390,49 @@ def _product_panel_payload(product_id: str) -> dict:
             },
         })
     else:
-        body.append({"type": 10, "content": header_content})
+        body.append({"type": 10, "content": header_txt})
 
-    # Invite only badge
+    # About section
+    body.append({"type": 14})
+    body.append({"type": 10, "content": f"{prod_pfx}**ABOUT**\n{bullet}{p['desc']}"})
+
+    # Invite only warning block
     if p["invite_only"]:
         body.append({"type": 14})
         body.append({"type": 10, "content": (
-            f"{lock}**INVITE ONLY** - Access granted through existing private members or staff only. "
-            "Not available to the public."
+            f"{lock_pfx}**INVITE ONLY**\n"
+            f"{bullet}Access granted through existing private members or staff only.\n"
+            f"{bullet}Not available for direct purchase."
         )})
 
     # Features
     body.append({"type": 14})
     features_txt = "\n".join(f"{bullet}{f}" for f in p["features"])
-    body.append({"type": 10, "content": f"**Features**\n{features_txt}"})
+    body.append({"type": 10, "content": f"{prod_pfx}**FEATURES**\n{features_txt}"})
 
     # Pricing
     body.append({"type": 14})
-    pricing_lines = []
-    for i, (label, price) in enumerate(p["pricing"]):
-        pricing_lines.append(f"{bullet}**{label}** - {price}")
-    body.append({"type": 10, "content": "**Pricing**\n" + "\n".join(pricing_lines)})
+    pricing_lines = [f"{bullet}**{label}** - {price}" for label, price in p["pricing"]]
+    body.append({"type": 10, "content": f"{key_pfx}**PRICING**\n" + "\n".join(pricing_lines)})
 
-    # CTA
+    # CTA button section
     body.append({"type": 14})
-    body.append(_v2_section(
-        f"-# {brand} - Secure your access today.",
-        "BUY NOW",
-        "void_ticket_open_purchase",
-        btn_emoji_name="key",
-        btn_style=3,
-    ))
+    if p["invite_only"]:
+        body.append(_v2_section(
+            f"{warn_pfx}**REQUEST ACCESS**\n{bullet}Contact staff or an existing private member to get an invite.",
+            "OPEN TICKET",
+            "void_ticket_open_purchase",
+            btn_emoji_name="key",
+            btn_style=3,
+        ))
+    else:
+        body.append(_v2_section(
+            f"{key_pfx}**SECURE YOUR ACCESS**\n{bullet}Start your order by opening a support ticket.",
+            "BUY NOW",
+            "void_ticket_open_purchase",
+            btn_emoji_name="key",
+            btn_style=3,
+        ))
     return _v2_container(body, accent=p["accent"])
 
 
