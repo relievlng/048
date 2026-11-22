@@ -128,6 +128,16 @@ def now_iso() -> str:
 def ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+async def _get_member(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+    """Fetch a guild member by ID, returns None if not in server."""
+    m = guild.get_member(user_id)
+    if m:
+        return m
+    try:
+        return await guild.fetch_member(user_id)
+    except (discord.NotFound, discord.HTTPException):
+        return None
+
 def audit_staff(action: str, actor_id: str = None, target_id: str = None, detail: str = None):
     DB.execute(
         "INSERT INTO audit_log (timestamp, action, actor_id, target_id, detail) VALUES (?,?,?,?,?)",
@@ -912,7 +922,7 @@ admin_only = staff_only  # admin commands use same role gate on the staff bot
 async def cmd_keygen(i: discord.Interaction,
                      product: str = "private",
                      duration: Optional[str] = "lifetime",
-                     deliver_to: Optional[discord.Member] = None,
+                     deliver_to: Optional[discord.User] = None,
                      notes: Optional[str] = None):
     try:
         await i.response.defer(ephemeral=True)
@@ -1185,7 +1195,7 @@ async def cmd_lookup(i: discord.Interaction, query: str):
 @app_commands.command(name="ban", description="[ADMIN] Ban a user - blocks loader, bans HWID + IP, kicks from server.")
 @app_commands.describe(user="Target user", reason="Ban reason")
 @admin_only()
-async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional[str] = None):
+async def cmd_ban(i: discord.Interaction, user: discord.User, reason: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     row = DB.execute("SELECT * FROM users WHERE discord_id=?", (did,)).fetchone()
@@ -1221,19 +1231,23 @@ async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional
     DB.commit()
 
     try:
-        vr = i.guild.get_role(CONFIG["verified_role_id"])
-        br = i.guild.get_role(CONFIG["banned_role_id"])
-        if vr and vr in user.roles:
-            await user.remove_roles(vr, reason="KeyLock ban")
-        if br:
-            await user.add_roles(br, reason="KeyLock ban")
+        member = await _get_member(i.guild, user.id)
+        if member:
+            vr = i.guild.get_role(CONFIG["verified_role_id"])
+            br = i.guild.get_role(CONFIG["banned_role_id"])
+            if vr and vr in member.roles:
+                await member.remove_roles(vr, reason="KeyLock ban")
+            if br:
+                await member.add_roles(br, reason="KeyLock ban")
     except Exception:
         pass
 
     kicked = False
     try:
-        await user.kick(reason=f"KeyLock ban: {ban_reason}")
-        kicked = True
+        member = await _get_member(i.guild, user.id)
+        if member:
+            await member.kick(reason=f"KeyLock ban: {ban_reason}")
+            kicked = True
     except Exception as ex:
         log.warning("Kick failed for %s: %s", did, ex)
 
@@ -1260,7 +1274,7 @@ async def cmd_ban(i: discord.Interaction, user: discord.Member, reason: Optional
 @app_commands.command(name="unban", description="[ADMIN] Unban a user's license.")
 @app_commands.describe(user="Target user")
 @admin_only()
-async def cmd_unban(i: discord.Interaction, user: discord.Member):
+async def cmd_unban(i: discord.Interaction, user: discord.User):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
@@ -1269,12 +1283,14 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
     DB.execute("UPDATE users SET status='active', ban_reason=NULL WHERE discord_id=?", (did,))
     DB.commit()
     try:
-        vr = i.guild.get_role(CONFIG["verified_role_id"])
-        br = i.guild.get_role(CONFIG["banned_role_id"])
-        if vr:
-            await user.add_roles(vr, reason="KeyLock unban")
-        if br and br in user.roles:
-            await user.remove_roles(br, reason="KeyLock unban")
+        member = await _get_member(i.guild, user.id)
+        if member:
+            vr = i.guild.get_role(CONFIG["verified_role_id"])
+            br = i.guild.get_role(CONFIG["banned_role_id"])
+            if vr:
+                await member.add_roles(vr, reason="KeyLock unban")
+            if br and br in member.roles:
+                await member.remove_roles(br, reason="KeyLock unban")
     except Exception:
         pass
     audit("UNBAN", actor_id=str(i.user.id), target_id=did)
@@ -1293,7 +1309,7 @@ async def cmd_unban(i: discord.Interaction, user: discord.Member):
 @app_commands.command(name="revoke", description="[ADMIN] Permanently revoke a license.")
 @app_commands.describe(user="Target user", reason="Reason")
 @admin_only()
-async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optional[str] = None):
+async def cmd_revoke(i: discord.Interaction, user: discord.User, reason: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
@@ -1302,9 +1318,11 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
     DB.execute("UPDATE users SET status='revoked', ban_reason=? WHERE discord_id=?", (reason or "Revoked", did))
     DB.commit()
     try:
-        vr = i.guild.get_role(CONFIG["verified_role_id"])
-        if vr and vr in user.roles:
-            await user.remove_roles(vr, reason="KeyLock revoke")
+        member = await _get_member(i.guild, user.id)
+        if member:
+            vr = i.guild.get_role(CONFIG["verified_role_id"])
+            if vr and vr in member.roles:
+                await member.remove_roles(vr, reason="KeyLock revoke")
     except Exception:
         pass
     audit("REVOKE", actor_id=str(i.user.id), target_id=did, detail=reason)
@@ -1324,7 +1342,7 @@ async def cmd_revoke(i: discord.Interaction, user: discord.Member, reason: Optio
 @app_commands.command(name="addnote_admin", description="[ADMIN] Append an admin note to a user (by mention/ID).")
 @app_commands.describe(user="Target user", note="Note text")
 @admin_only()
-async def cmd_addnote(i: discord.Interaction, user: discord.Member, note: str):
+async def cmd_addnote(i: discord.Interaction, user: discord.User, note: str):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     row = DB.execute("SELECT notes FROM users WHERE discord_id=?", (did,)).fetchone()
@@ -1346,7 +1364,7 @@ async def cmd_addnote(i: discord.Interaction, user: discord.Member, note: str):
 @app_commands.command(name="resethwid", description="[ADMIN] Force-reset or rebind a user's HWID.")
 @app_commands.describe(user="Target user", new_hwid="New HWID to bind (blank = clear)")
 @admin_only()
-async def cmd_resethwid(i: discord.Interaction, user: discord.Member, new_hwid: Optional[str] = None):
+async def cmd_resethwid(i: discord.Interaction, user: discord.User, new_hwid: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
@@ -1418,7 +1436,7 @@ async def cmd_hwid(i: discord.Interaction, action: str, raw_hwid: str, reason: O
 @app_commands.command(name="extend", description="[ADMIN] Set or extend a user's expiry date.")
 @app_commands.describe(user="Target user", expires="New expiry YYYY-MM-DD")
 @admin_only()
-async def cmd_extend(i: discord.Interaction, user: discord.Member, expires: str):
+async def cmd_extend(i: discord.Interaction, user: discord.User, expires: str):
     await i.response.defer(ephemeral=True)
     exp_iso = parse_date(expires)
     if not exp_iso:
@@ -1442,7 +1460,7 @@ async def cmd_extend(i: discord.Interaction, user: discord.Member, expires: str)
 @app_commands.command(name="setproduct", description="[ADMIN] Change a user's product tier.")
 @app_commands.describe(user="Target user", product="New product name")
 @admin_only()
-async def cmd_setproduct(i: discord.Interaction, user: discord.Member, product: str):
+async def cmd_setproduct(i: discord.Interaction, user: discord.User, product: str):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     if not DB.execute("SELECT 1 FROM users WHERE discord_id=?", (did,)).fetchone():
@@ -1463,7 +1481,7 @@ async def cmd_setproduct(i: discord.Interaction, user: discord.Member, product: 
 @app_commands.command(name="grantresets", description="[ADMIN] Give a user extra HWID reset uses.")
 @app_commands.describe(user="Target user", count="Adjust reset counter by this amount (negative = grant more)")
 @admin_only()
-async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: int = -1):
+async def cmd_grantresets(i: discord.Interaction, user: discord.User, count: int = -1):
     await i.response.defer(ephemeral=True)
     did = str(user.id)
     row = DB.execute("SELECT hwid_resets FROM users WHERE discord_id=?", (did,)).fetchone()
@@ -1505,7 +1523,7 @@ async def cmd_grantresets(i: discord.Interaction, user: discord.Member, count: i
     app_commands.Choice(name="check                  - view current status",              value="check"),
 ])
 @admin_only()
-async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
+async def cmd_fac(i: discord.Interaction, action: str, user: discord.User,
                   reason: Optional[str] = None, ticket: Optional[str] = None):
     await i.response.defer(ephemeral=True)
     action = action.lower().strip()
@@ -1545,8 +1563,10 @@ async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                 fac_role = i.guild.get_role(fac_role_id)
                 if fac_role:
                     try:
-                        await user.add_roles(fac_role, reason=f"FAC paid - authorized by {i.user}")
-                        role_assigned = True
+                        member = await _get_member(i.guild, user.id)
+                        if member:
+                            await member.add_roles(fac_role, reason=f"FAC paid - authorized by {i.user}")
+                            role_assigned = True
                     except Exception as re:
                         log.warning("Failed to assign FAC paid role: %s", re)
 
@@ -1601,8 +1621,10 @@ async def cmd_fac(i: discord.Interaction, action: str, user: discord.Member,
                 hwid_role = i.guild.get_role(hwid_role_id)
                 if hwid_role:
                     try:
-                        await user.add_roles(hwid_role, reason=f"HWID reset paid - authorized by {i.user}")
-                        role_assigned = True
+                        member = await _get_member(i.guild, user.id)
+                        if member:
+                            await member.add_roles(hwid_role, reason=f"HWID reset paid - authorized by {i.user}")
+                            role_assigned = True
                     except Exception as re:
                         log.warning("Failed to assign HWID paid role: %s", re)
 
@@ -1897,7 +1919,7 @@ async def cmd_purgeexpired(i: discord.Interaction):
     description="[ADMIN] Completely wipe a user's registration (frees their key).")
 @app_commands.describe(user="Target user", confirm="Type CONFIRM to proceed")
 @admin_only()
-async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: str = ""):
+async def cmd_wipeuser(i: discord.Interaction, user: discord.User, confirm: str = ""):
     await i.response.defer(ephemeral=True)
     if confirm != "CONFIRM":
         await i.followup.send(embed=err_embed("Confirmation Required", "Pass `confirm: CONFIRM` to wipe a user. This action is permanent and cannot be undone."), ephemeral=True)
@@ -1911,9 +1933,11 @@ async def cmd_wipeuser(i: discord.Interaction, user: discord.Member, confirm: st
     DB.execute("UPDATE key_pool SET claimed=0 WHERE key=?", (row["key"],))
     DB.commit()
     try:
-        vr = i.guild.get_role(CONFIG["verified_role_id"])
-        if vr and vr in user.roles:
-            await user.remove_roles(vr, reason="KeyLock wipe")
+        member = await _get_member(i.guild, user.id)
+        if member:
+            vr = i.guild.get_role(CONFIG["verified_role_id"])
+            if vr and vr in member.roles:
+                await member.remove_roles(vr, reason="KeyLock wipe")
     except Exception:
         pass
     audit("WIPE_USER", actor_id=str(i.user.id), target_id=did)
@@ -1959,7 +1983,7 @@ async def cmd_invite(i: discord.Interaction):
 @admin_only()
 async def cmd_test(i: discord.Interaction,
                    event: str,
-                   user: discord.Member,
+                   user: discord.User,
                    fake_ip: Optional[str] = "127.0.0.1",
                    fake_hwid: Optional[str] = None,
                    detail: Optional[str] = None):
@@ -2073,7 +2097,7 @@ async def cmd_test(i: discord.Interaction,
 @app_commands.autocomplete(duration=autocomplete_duration, product=autocomplete_product)
 @admin_only()
 async def cmd_seed(i: discord.Interaction,
-                   user: discord.Member,
+                   user: discord.User,
                    product: str = "private",
                    duration: str = "lifetime",
                    fake_hwid: Optional[str] = None,
@@ -2127,9 +2151,11 @@ async def cmd_seed(i: discord.Interaction,
     DB.commit()
 
     try:
-        vr = i.guild.get_role(CONFIG["verified_role_id"])
-        if vr:
-            await user.add_roles(vr, reason="KeyLock seed")
+        member = await _get_member(i.guild, user.id)
+        if member:
+            vr = i.guild.get_role(CONFIG["verified_role_id"])
+            if vr:
+                await member.add_roles(vr, reason="KeyLock seed")
     except Exception:
         pass
 
