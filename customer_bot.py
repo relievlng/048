@@ -577,6 +577,7 @@ async def on_ready():
 @bot.tree.command(name="setup-tickets", description="[Admin] Post the ticket panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_tickets(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     cats = "\n".join(
         f"{e('dot')} **{cat['label']}** - {cat['desc']}"
         for cat in TICKET_CATEGORIES.values()
@@ -590,12 +591,13 @@ async def setup_tickets(interaction: discord.Interaction):
         components=[_container(text, 0x2b2d31)],
         view=TicketPanelView(),
     )
-    await _reply_v2(interaction, f"{e('verify')} Ticket panel posted.", color=0x57F287)
+    await interaction.followup.send(f"{e('verify')} Ticket panel posted.", ephemeral=True)
 
 
 @bot.tree.command(name="setup-verify", description="[Admin] Post the verification panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_verify(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     text = (
         f"## {e('verify')} Verification\n\n"
         "To access this server you need to verify your license key.\n\n"
@@ -607,12 +609,13 @@ async def setup_verify(interaction: discord.Interaction):
         components=[_container(text, 0x2b2d31)],
         view=VerifyView(),
     )
-    await _reply_v2(interaction, f"{e('verify')} Verification panel posted.", color=0x57F287)
+    await interaction.followup.send(f"{e('verify')} Verification panel posted.", ephemeral=True)
 
 
 @bot.tree.command(name="setup-hwid", description="[Admin] Post the HWID reset panel in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_hwid(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     text = (
         f"## {e('chip')} HWID Reset\n\n"
         "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
@@ -625,12 +628,13 @@ async def setup_hwid(interaction: discord.Interaction):
         components=[_container(text, 0x2b2d31)],
         view=HWIDView(),
     )
-    await _reply_v2(interaction, f"{e('verify')} HWID panel posted.", color=0x57F287)
+    await interaction.followup.send(f"{e('verify')} HWID panel posted.", ephemeral=True)
 
 
 @bot.tree.command(name="setup-rules", description="[Admin] Post the rules in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_rules(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     rules = [
         ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
         ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
@@ -653,12 +657,13 @@ async def setup_rules(interaction: discord.Interaction):
         "-# Last updated by staff"
     )
     await interaction.channel.send(components=[_container(text, 0x2b2d31)])
-    await _reply_v2(interaction, f"{e('verify')} Rules posted.", color=0x57F287)
+    await interaction.followup.send(f"{e('verify')} Rules posted.", ephemeral=True)
 
 
 @bot.tree.command(name="setup-info", description="[Admin] Post the setup instructions in the current channel.")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def setup_info_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     guild = interaction.guild
 
     ticket_ch = guild.get_channel(CONFIG["ticket_channel_id"])
@@ -680,7 +685,7 @@ async def setup_info_cmd(interaction: discord.Interaction):
         components=[_container(text, 0x2b2d31)],
         view=SetupPingsView(),
     )
-    await _reply_v2(interaction, f"{e('verify')} Setup info posted.", color=0x57F287)
+    await interaction.followup.send(f"{e('verify')} Setup info posted.", ephemeral=True)
 
 
 @bot.tree.command(name="key", description="Check your license key status.")
