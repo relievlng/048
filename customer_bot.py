@@ -490,26 +490,54 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
     Return the Discord category for the given ticket type.
     Creates it on the fly if it does not exist yet.
     Caches the ID in CONFIG so subsequent lookups are free.
+
+    Uses a three-stage lookup:
+      1. Cached category ID in CONFIG (free)
+      2. guild.categories cache - case-insensitive name match
+      3. guild.fetch_channels() REST call - catches categories the bot
+         can't see in its local cache (missing VIEW_CHANNEL overwrite)
     """
     cat        = TICKET_CATEGORIES[cat_id]
     config_key = cat["config_key"]
     cat_name   = cat["cat_name"]  # Discord-safe name (no slashes)
 
-    # Fast path: cached and still valid
+    # 1. Fast path: cached and still valid
     cached_id = CONFIG.get(config_key)
     if cached_id:
         ch = guild.get_channel(cached_id)
         if ch:
             return ch
+        log.warning("Cached category ID %d for %s is stale, re-resolving", cached_id, cat_name)
 
-    # Reuse an existing category with the same name
-    existing = discord.utils.get(guild.categories, name=cat_name)
+    # 2. Search the in-memory cache (case-insensitive match)
+    existing = next(
+        (c for c in guild.categories if c.name.lower() == cat_name.lower()),
+        None,
+    )
     if existing:
         CONFIG[config_key] = existing.id
-        log.info("Reused existing category %s (%d)", cat_name, existing.id)
+        log.info("Reused cached category %s (%d) for ticket type %s", existing.name, existing.id, cat_id)
         return existing
 
-    # Create the category now - only staff can see it; member overwrites added per-channel
+    # 3. Cache miss - fetch fresh from Discord REST API.
+    #    Needed when bot lacks VIEW_CHANNEL on the category and it's absent from cache.
+    log.info("Category %s not in cache for %s - fetching from API", cat_name, cat_id)
+    try:
+        all_channels = await guild.fetch_channels()
+        existing = next(
+            (c for c in all_channels
+             if isinstance(c, discord.CategoryChannel) and c.name.lower() == cat_name.lower()),
+            None,
+        )
+        if existing:
+            CONFIG[config_key] = existing.id
+            log.info("Reused API-fetched category %s (%d) for ticket type %s", existing.name, existing.id, cat_id)
+            return existing
+    except Exception as exc:
+        log.warning("fetch_channels failed: %s", exc)
+
+    # None found anywhere - create the category now
+    log.info("Creating new Discord category %s for ticket type %s", cat_name, cat_id)
     admin_role = guild.get_role(CONFIG["admin_role_id"])
     overwrites: dict = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -520,7 +548,6 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
             send_messages=True, read_message_history=True,
         )
 
-    # Position below the base ticket category if one is set
     base_cat = guild.get_channel(CONFIG.get("ticket_category_id") or 0)
     position = (base_cat.position + 1) if base_cat else 0
 
@@ -532,13 +559,13 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
             reason=f"Ticket category for {cat['label']}",
         )
         CONFIG[config_key] = new_cat.id
-        log.info("Created ticket category %s (%d)", cat_name, new_cat.id)
+        log.info("Created Discord category %s (%d) for ticket type %s", cat_name, new_cat.id, cat_id)
         return new_cat
     except discord.Forbidden:
-        log.error("Missing Manage Channels permission - cannot create category %s", cat_name)
+        log.error("Missing Manage Channels - cannot create category %s", cat_name)
         return None
     except discord.HTTPException as exc:
-        log.error("Failed to create ticket category %s: %s", cat_name, exc)
+        log.error("Failed to create category %s: %s", cat_name, exc)
         return None
 
 
