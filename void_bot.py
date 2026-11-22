@@ -441,13 +441,14 @@ def _ticket_panel_payload() -> dict:
     em_ticket = _emoji_in_text("ticket")
     em_dot    = _emoji_in_text("dot")
     pfx    = f"{em_ticket} " if em_ticket else "\U0001f3ab "
-    bullet = f"{em_dot} "   if em_dot    else "• "
+    bullet = f"{em_dot} "   if em_dot    else "- "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {pfx}Void Tickets\n"
-        "Select a category below to open a private ticket channel with staff."
+        f"# {pfx}Support\n"
+        "Pick a category below and we'll open a **private channel** just for you and the team.\n\n"
+        "-# Only you and our staff can see your ticket channel."
     )})
     body.append({"type": 14})
 
@@ -459,11 +460,11 @@ def _ticket_panel_payload() -> dict:
         em = _emoji_in_text(cat["emoji_key"])
         prefix = f"{em} " if em else ""
         body.append(_v2_section(
-            f"{prefix}**{cat['label'].upper()}**\n{bullet}{cat['desc']}",
+            f"{prefix}**{cat['label']}** - {cat['desc']}",
             cat["label"],
             f"void_ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
-            btn_style=1,
+            btn_style=2,
         ))
     return _v2_container(body, accent=BRAND_COLOR)
 
@@ -534,7 +535,7 @@ def _product_panel_payload(product_id: str) -> dict:
             "Open Ticket",
             "void_ticket_open_purchase",
             btn_emoji_name="key",
-            btn_style=1,
+            btn_style=2,
         ))
     else:
         body.append(_v2_section(
@@ -542,7 +543,7 @@ def _product_panel_payload(product_id: str) -> dict:
             "Buy Now",
             "void_ticket_open_purchase",
             btn_emoji_name="key",
-            btn_style=1,
+            btn_style=2,
         ))
     return _v2_container(body, accent=p["accent"])
 
@@ -586,40 +587,24 @@ def _payment_panel_payload() -> dict:
 
 def _verify_panel_payload() -> dict:
     em_lock   = _emoji_in_text("lock")
-    em_ticket = _emoji_in_text("ticket")
     em_verify = _emoji_in_text("verify")
-    em_dot    = _emoji_in_text("dot")
     lock_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
-    ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f39f "
     verify_pfx = f"{em_verify} " if em_verify else ""
-    bullet     = f"{em_dot} "    if em_dot    else "• "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {lock_pfx}Verification\n"
-        "Already bought from us? Click Verify below to unlock your server role."
-    )})
-    body.append({"type": 14})
-    body.append({"type": 10, "content": (
-        f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}Your Discord account is linked to your order when you buy.\n"
-        f"{bullet}Click Verify and answer a quick spam check to get your role.\n"
-        f"{bullet}Lost your role? You can verify again at any time."
-    )})
-    body.append({"type": 14})
-    body.append({"type": 10, "content": (
-        f"{ticket_pfx}**HAVEN'T PURCHASED YET?**\n"
-        f"{bullet}Check out our products and open a ticket to get started."
+        f"# {lock_pfx}Verification\n"
+        "Click the button below to verify and unlock access to the server.\n\n"
+        "-# Completes a quick check to make sure you're not a bot."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**HAVE AN ORDER?**\n"
-        f"{bullet}No Invoice ID or key - just click the button below.",
+        f"{verify_pfx}**VERIFY NOW**",
         "Verify",
         "void_verify_button",
         btn_emoji_name="verify",
-        btn_style=1,
+        btn_style=2,
     ))
     return _v2_container(body, accent=BRAND_COLOR)
 

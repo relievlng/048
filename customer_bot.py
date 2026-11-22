@@ -436,8 +436,9 @@ def _ticket_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {ticket_pfx}Support Tickets\n"
-        "Select a category below to open a private support channel with staff."
+        f"# {ticket_pfx}Support\n"
+        "Pick a category below and we'll open a **private channel** just for you and the team.\n\n"
+        "-# Only you and our staff can see your ticket channel."
     )})
     body.append({"type": 14})
     first = True
@@ -448,12 +449,13 @@ def _ticket_panel_payload() -> dict:
         em = _emoji_in_text(cat["emoji_key"])
         prefix = f"{em} " if em else ""
         body.append(_v2_section(
-            f"{prefix}**{cat['label'].upper()}**\n{bullet}{cat['desc']}",
+            f"{prefix}**{cat['label']}** - {cat['desc']}",
             cat["label"],
             f"ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
+            btn_style=2,
         ))
-    return _v2_container(body, accent=0x5865F2)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _verify_panel_payload() -> dict:
@@ -468,26 +470,27 @@ def _verify_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {lock_pfx}Verification\n"
-        "Enter your Invoice ID to unlock access and get set up."
+        f"# {lock_pfx}Verification\n"
+        "Enter your **Invoice ID** below to verify your purchase and unlock your access.\n\n"
+        "-# Your Invoice ID was provided by staff after your order was confirmed."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}After purchase, staff will DM you an Invoice ID.\n"
-        f"{bullet}Enter that Invoice ID here to verify your purchase.\n"
-        f"{bullet}Use the same Invoice ID to re-verify at any time."
+        f"{bullet}After purchase, staff will give you an Invoice ID.\n"
+        f"{bullet}Click Verify below and enter that ID to get your role.\n"
+        f"{bullet}Lost access? Use the same Invoice ID to re-verify anytime."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
-        f"{bullet}Have your Invoice ID ready before clicking.",
+        f"{verify_pfx}**HAVE AN INVOICE ID?**\n"
+        f"{bullet}Click below and enter it when prompted.",
         "Verify",
         "verify_button",
         btn_emoji_name="verify",
-        btn_style=3,
+        btn_style=2,
     ))
-    return _v2_container(body, accent=0x57F287)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _hwid_panel_payload() -> dict:
@@ -520,7 +523,7 @@ def _hwid_panel_payload() -> dict:
         "hwid_reset_button",
         btn_emoji_name="chip",
     ))
-    return _v2_container(body, accent=0xFEE75C)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _rules_panel_payload() -> dict:
