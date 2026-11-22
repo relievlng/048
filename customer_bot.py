@@ -728,7 +728,7 @@ async def _setup_emojis(guild: discord.Guild) -> None:
         log.info("=" * 60)
 
 
-# ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
+# ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
     "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
@@ -736,6 +736,323 @@ TICKET_CATEGORIES = {
     "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
     "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
 }
+
+# ─── TICKET COUNTER ───────────────────────────────────────────────────────────
+
+def _init_ticket_counter():
+    """Ensure the ticket_counter table exists."""
+    with get_db() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ticket_counter "
+            "(id INTEGER PRIMARY KEY, next_num INTEGER NOT NULL DEFAULT 1)"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO ticket_counter (id, next_num) VALUES (1, 1)"
+        )
+        conn.commit()
+
+def get_next_ticket_number() -> int:
+    """Atomically increment and return the next ticket number."""
+    _init_ticket_counter()
+    with get_db() as conn:
+        row = conn.execute("SELECT next_num FROM ticket_counter WHERE id = 1").fetchone()
+        num = row["next_num"] if row else 1
+        conn.execute("UPDATE ticket_counter SET next_num = next_num + 1 WHERE id = 1")
+        conn.commit()
+        return num
+
+# ─── HTML TRANSCRIPT BUILDER ──────────────────────────────────────────────────
+
+def _html_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+    )
+
+def _fmt_discord_md(text: str) -> str:
+    """Very lightweight Discord markdown -> HTML converter."""
+    import html as html_mod
+    s = html_mod.escape(text)
+    # Code blocks (must come before inline code)
+    s = re.sub(r'```(?:\w+\n)?(.*?)```', lambda m: f'<pre><code>{m.group(1).strip()}</code></pre>', s, flags=re.DOTALL)
+    s = re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+    # Bold / italic / underline / strikethrough
+    s = re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', s)
+    s = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
+    s = re.sub(r'\*(.+?)\*', r'<em>\1</em>', s)
+    s = re.sub(r'__(.+?)__', r'<u>\1</u>', s)
+    s = re.sub(r'~~(.+?)~~', r'<s>\1</s>', s)
+    # Spoilers
+    s = re.sub(r'\|\|(.+?)\|\|', r'<span class="spoiler">\1</span>', s)
+    # Newlines
+    s = s.replace('\n', '<br>')
+    return s
+
+def _build_html_transcript(
+    messages: list,
+    channel_name: str,
+    opener_name: str,
+    closed_by_name: str,
+    cat_label: str,
+    ticket_num_str: str,
+    duration_str: str,
+    opened_at: str,
+) -> str:
+    """Generate a Discord-dark-theme HTML transcript like TicketTool produces."""
+
+    # Group consecutive messages from the same author within 7 minutes
+    groups = []
+    for msg in messages:
+        if (
+            groups
+            and groups[-1][0].author.id == msg.author.id
+            and not msg.author.bot
+            and (msg.created_at - groups[-1][-1].created_at).total_seconds() < 420
+        ):
+            groups[-1].append(msg)
+        else:
+            groups.append([msg])
+
+    # Render messages
+    rows_html = []
+    last_date = None
+    for group in groups:
+        first = group[0]
+        date_label = first.created_at.strftime("%B %d, %Y")
+        if date_label != last_date:
+            rows_html.append(f'<div class="date-divider">{_html_escape(date_label)}</div>')
+            last_date = date_label
+
+        is_bot = first.author.bot
+        avatar_url = str(first.author.display_avatar.url) if first.author.display_avatar else ""
+        display_name = _html_escape(first.author.display_name)
+        username_class = "username bot" if is_bot else "username"
+        bot_badge = '<span class="bot-badge">APP</span>' if is_bot else ""
+        ts_full = first.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        ts_short = first.created_at.strftime("%H:%M")
+
+        # Build all messages in the group
+        msgs_in_group = []
+        for i, msg in enumerate(group):
+            msg_ts = msg.created_at.strftime("%H:%M")
+            msg_parts = []
+
+            # Content
+            if msg.content:
+                msg_parts.append(f'<div class="message-text">{_fmt_discord_md(msg.content)}</div>')
+
+            # Embeds
+            for emb in msg.embeds:
+                emb_html = '<div class="embed">'
+                if emb.title:
+                    emb_html += f'<div class="embed-title">{_html_escape(emb.title)}</div>'
+                if emb.description:
+                    emb_html += f'<div class="embed-description">{_fmt_discord_md(emb.description)}</div>'
+                if emb.fields:
+                    emb_html += '<div class="embed-fields">'
+                    for field in emb.fields:
+                        emb_html += (
+                            f'<div class="embed-field">'
+                            f'<div class="embed-field-name">{_html_escape(field.name)}</div>'
+                            f'<div class="embed-field-value">{_fmt_discord_md(field.value)}</div>'
+                            f'</div>'
+                        )
+                    emb_html += '</div>'
+                emb_html += '</div>'
+                msg_parts.append(emb_html)
+
+            # Attachments
+            for att in msg.attachments:
+                att_name = _html_escape(att.filename)
+                att_url = att.url
+                if att.content_type and att.content_type.startswith("image/"):
+                    msg_parts.append(
+                        f'<div class="attachment-img"><a href="{att_url}" target="_blank">'
+                        f'<img src="{att_url}" alt="{att_name}" class="img-attachment"></a></div>'
+                    )
+                else:
+                    msg_parts.append(
+                        f'<a class="attachment" href="{att_url}" target="_blank">'
+                        f'<span>&#128206;</span> {att_name}</a>'
+                    )
+
+            if not msg_parts:
+                msg_parts.append('<div class="message-text" style="color:#6b7280">[No content]</div>')
+
+            msg_body = "".join(msg_parts)
+            if i == 0:
+                msgs_in_group.append(
+                    f'<div class="message-group first-in-sequence">'
+                    f'  <div class="avatar-col"><img class="avatar" src="{avatar_url}" alt="{display_name}" onerror="this.style.display=\'none\'"></div>'
+                    f'  <div class="message-content">'
+                    f'    <div class="message-header">'
+                    f'      <span class="{username_class}">{display_name}</span>'
+                    f'      {bot_badge}'
+                    f'      <span class="timestamp" title="{ts_full}">{ts_short}</span>'
+                    f'    </div>'
+                    f'    {msg_body}'
+                    f'  </div>'
+                    f'</div>'
+                )
+            else:
+                msg_full_ts = msg.created_at.strftime("%H:%M:%S UTC")
+                msgs_in_group.append(
+                    f'<div class="message-group">'
+                    f'  <div class="avatar-col"><span class="ts-side" title="{msg_full_ts}">{msg_ts}</span></div>'
+                    f'  <div class="message-content">{msg_body}</div>'
+                    f'</div>'
+                )
+
+        rows_html.append("".join(msgs_in_group))
+
+    messages_html = "\n".join(rows_html)
+    total_count = len(messages)
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transcript - #{_html_escape(channel_name)}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#313338;color:#dbdee1;font-family:"gg sans","Noto Sans",Whitney,"Helvetica Neue",Helvetica,Roboto,Arial,sans-serif;font-size:16px;line-height:1.375}}
+.header{{background:#1e1f22;border-bottom:1px solid #232428;padding:20px 24px;display:flex;align-items:center;gap:16px}}
+.header-icon{{width:52px;height:52px;border-radius:50%;background:#5865f2;display:flex;align-items:center;justify-content:center;font-size:26px;flex-shrink:0}}
+.header-info h1{{font-size:20px;font-weight:700;color:#fff}}
+.header-info p{{font-size:14px;color:#949ba4;margin-top:3px}}
+.stats-bar{{background:#2b2d31;border-bottom:1px solid #232428;padding:14px 24px;display:flex;gap:32px;flex-wrap:wrap}}
+.stat{{display:flex;flex-direction:column}}
+.stat-label{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#949ba4}}
+.stat-value{{font-size:14px;color:#dbdee1;margin-top:3px}}
+.messages{{padding:16px 24px 32px}}
+.date-divider{{display:flex;align-items:center;gap:8px;padding:20px 0 8px;color:#949ba4;font-size:12px;font-weight:500}}
+.date-divider::before,.date-divider::after{{content:"";flex:1;height:1px;background:#3f4147}}
+.message-group{{display:flex;padding:2px 8px;border-radius:4px;min-height:22px}}
+.message-group:hover{{background:rgba(4,4,5,.07)}}
+.message-group.first-in-sequence{{margin-top:17px;padding-top:4px}}
+.avatar-col{{width:40px;flex-shrink:0;margin-right:12px;padding-top:2px}}
+.avatar{{width:40px;height:40px;border-radius:50%;object-fit:cover;cursor:pointer}}
+.ts-side{{font-size:11px;color:transparent;line-height:22px;display:block;text-align:right;white-space:nowrap;user-select:none}}
+.message-group:hover .ts-side{{color:#949ba4}}
+.message-content{{flex:1;min-width:0}}
+.message-header{{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}}
+.username{{font-size:16px;font-weight:500;color:#fff;cursor:pointer}}
+.username:hover{{text-decoration:underline}}
+.username.bot{{color:#949ba4}}
+.bot-badge{{background:#5865f2;color:#fff;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase;letter-spacing:.04em;vertical-align:middle}}
+.timestamp{{font-size:11px;color:#949ba4;white-space:nowrap}}
+.message-text{{font-size:15px;color:#dbdee1;word-break:break-word;white-space:pre-wrap}}
+.message-text code{{background:#1e1f22;border-radius:3px;padding:0 4px;font-family:Consolas,"Andale Mono WT",monospace;font-size:85%;color:#e06c75}}
+.message-text pre{{background:#1e1f22;border-radius:4px;padding:8px 12px;margin-top:4px;overflow-x:auto;border:1px solid #111214}}
+.message-text pre code{{color:#abb2bf;background:none;padding:0;font-size:13px}}
+.spoiler{{background:#202225;color:#202225;border-radius:2px;cursor:pointer}}
+.spoiler:hover{{background:transparent;color:#dbdee1}}
+.embed{{max-width:520px;border-radius:4px;border-left:4px solid #5865f2;background:#2b2d31;padding:8px 12px 10px;margin-top:4px}}
+.embed-title{{font-weight:600;font-size:15px;color:#fff;margin-bottom:4px}}
+.embed-description{{font-size:14px;color:#dbdee1;white-space:pre-wrap}}
+.embed-fields{{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}}
+.embed-field{{min-width:120px}}
+.embed-field-name{{font-size:12px;font-weight:700;color:#dbdee1;text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}}
+.embed-field-value{{font-size:13px;color:#dbdee1}}
+.attachment{{display:inline-flex;align-items:center;gap:8px;background:#2b2d31;border:1px solid #1e1f22;border-radius:4px;padding:8px 12px;margin-top:4px;font-size:14px;color:#00aff4;text-decoration:none;max-width:400px}}
+.attachment:hover{{text-decoration:underline}}
+.img-attachment img.img-attachment{{max-width:400px;max-height:300px;border-radius:4px;margin-top:4px;display:block}}
+.footer{{background:#1e1f22;border-top:1px solid #232428;padding:16px 24px;text-align:center;font-size:13px;color:#949ba4}}
+.footer strong{{color:#dbdee1}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-icon">&#127903;</div>
+  <div class="header-info">
+    <h1>#{_html_escape(channel_name)}</h1>
+    <p>{_html_escape(cat_label)} Ticket &bull; Ticket #{_html_escape(ticket_num_str)}</p>
+  </div>
+</div>
+<div class="stats-bar">
+  <div class="stat"><span class="stat-label">Ticket</span><span class="stat-value">#{_html_escape(ticket_num_str)}</span></div>
+  <div class="stat"><span class="stat-label">Category</span><span class="stat-value">{_html_escape(cat_label)}</span></div>
+  <div class="stat"><span class="stat-label">Opened by</span><span class="stat-value">{_html_escape(opener_name)}</span></div>
+  <div class="stat"><span class="stat-label">Closed by</span><span class="stat-value">{_html_escape(closed_by_name)}</span></div>
+  <div class="stat"><span class="stat-label">Duration</span><span class="stat-value">{_html_escape(duration_str)}</span></div>
+  <div class="stat"><span class="stat-label">Opened</span><span class="stat-value">{_html_escape(opened_at)}</span></div>
+  <div class="stat"><span class="stat-label">Messages</span><span class="stat-value">{total_count}</span></div>
+</div>
+<div class="messages">
+{messages_html}
+</div>
+<div class="footer">
+  Transcript generated <strong>{generated_at}</strong> &bull; {total_count} messages &bull; <strong>#{_html_escape(channel_name)}</strong>
+</div>
+</body>
+</html>"""
+
+
+class CloseConfirmModal(discord.ui.Modal, title="Close Ticket"):
+    reason = discord.ui.TextInput(
+        label="Reason for closing",
+        placeholder="e.g. Issue resolved, No response, etc.",
+        required=False,
+        max_length=200,
+        style=discord.TextStyle.short,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        close_reason = self.reason.value.strip() or "No reason provided"
+        await close_ticket(interaction, reason=close_reason)
+
+
+class AddUserModal(discord.ui.Modal, title="Add User to Ticket"):
+    user_id_input = discord.ui.TextInput(
+        label="User ID",
+        placeholder="Right-click a user > Copy ID and paste it here",
+        min_length=15,
+        max_length=20,
+        style=discord.TextStyle.short,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = interaction.channel
+        raw = self.user_id_input.value.strip().lstrip("<@!>").rstrip(">")
+        try:
+            uid = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=_make_embed(f"Invalid user ID: `{raw}`\nRight-click the user, then Copy ID.", 0xED4245),
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.guild.get_member(uid)
+        if not member:
+            try:
+                member = await interaction.guild.fetch_member(uid)
+            except discord.NotFound:
+                await interaction.response.send_message(
+                    embed=_make_embed(f"No member found with ID `{uid}`.", 0xED4245),
+                    ephemeral=True,
+                )
+                return
+
+        await channel.set_permissions(
+            member,
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+        )
+        await interaction.response.send_message(
+            embed=_make_embed(
+                f"**{member.mention}** (`{member.name}`) has been added to this ticket.",
+                0x57F287,
+            ),
+            ephemeral=False,
+        )
+        log.info("Added %s (%d) to ticket %s by %s", member, uid, channel.name, interaction.user)
+
 
 class TicketPanelView(discord.ui.View):
     def __init__(self):
@@ -762,13 +1079,48 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="ticket_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await close_ticket(interaction)
+        await interaction.response.send_modal(CloseConfirmModal())
 
     @discord.ui.button(label="Claim", style=discord.ButtonStyle.secondary, custom_id="ticket_claim")
     async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        admin_role = interaction.guild.get_role(CONFIG["admin_role_id"])
+        if not (admin_role and admin_role in interaction.user.roles):
+            await interaction.response.send_message(
+                embed=_make_embed("Only staff can claim tickets.", 0xED4245),
+                ephemeral=True,
+            )
+            return
+
+        channel = interaction.channel
+        # Update topic to include claimed-by
+        current_topic = channel.topic or ""
+        # Remove any existing Claimed: segment first
+        new_topic = re.sub(r'\s*\|\s*Claimed:[^\|]*', '', current_topic).strip()
+        new_topic = f"{new_topic} | Claimed:{interaction.user.id}"
+        try:
+            await channel.edit(topic=new_topic[:1024])
+        except Exception:
+            pass
+
         await interaction.response.send_message(
-            f"**{interaction.user.mention}** has claimed this ticket.", ephemeral=False
+            embed=_make_embed(
+                f"**{interaction.user.mention}** has claimed this ticket.",
+                0x5865F2,
+            ),
+            ephemeral=False,
         )
+        log.info("Ticket %s claimed by %s (%d)", channel.name, interaction.user, interaction.user.id)
+
+    @discord.ui.button(label="Add User", style=discord.ButtonStyle.primary, custom_id="ticket_add_user")
+    async def add_user_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        admin_role = interaction.guild.get_role(CONFIG["admin_role_id"])
+        if not (admin_role and admin_role in interaction.user.roles):
+            await interaction.response.send_message(
+                embed=_make_embed("Only staff can add users to tickets.", 0xED4245),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(AddUserModal())
 
 
 async def open_ticket(interaction: discord.Interaction, cat_id: str):
@@ -791,9 +1143,12 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         )
         return
 
-    # Build a clean channel name: {prefix}-{safe-username}
-    safe_name = re.sub(r"[^a-z0-9]", "-", member.name.lower())[:20].strip("-") or str(member.id)
-    channel_name = f"{cat_info['channel_prefix']}-{safe_name}"
+    # Assign ticket number before creating the channel
+    ticket_num = get_next_ticket_number()
+    ticket_num_str = str(ticket_num).zfill(4)
+
+    # Build a clean channel name: {prefix}-{ticket_num}
+    channel_name = f"{cat_info['channel_prefix']}-{ticket_num_str}"
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
 
@@ -817,31 +1172,37 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         f"{ticket_category.name}({ticket_category.id})" if ticket_category else "None - channel will land at top level",
     )
 
+    # Topic stores all parseable metadata: category | user (id) | #num
+    topic = f"{cat_info['label']} | {member.name} ({member.id}) | #{ticket_num_str}"
     channel = await guild.create_text_channel(
         name=channel_name,
         category=ticket_category,
         overwrites=overwrites,
-        topic=f"{cat_info['label']} | {member} ({member.id})",
+        topic=topic,
     )
 
+    # --- Rich ticket open embed ---
+    now_ts = int(discord.utils.utcnow().timestamp())
     text = (
         f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
-        f"Hey {member.mention}, thanks for reaching out.\n\n"
-        f"**Category** {cat_info['desc']}\n\n"
-        "Describe your issue and a staff member will be with you shortly.\n"
-        "Use the **Close Ticket** button below when your issue is resolved.\n\n"
-        f"-# Ticket opened by {member}"
+        f"Welcome, {member.mention}. A staff member will be with you shortly.\n\n"
+        f"**Category** {cat_info['desc']}\n"
+        f"**Ticket** #{ticket_num_str}\n"
+        f"**Opened** <t:{now_ts}:R>\n\n"
+        "Please describe your issue in as much detail as possible. "
+        "Include any relevant screenshots, order IDs, or error messages.\n\n"
+        "-# Use the buttons below to manage this ticket."
     )
     mention_str = admin_role.mention if admin_role else ""
     await channel.send(
         content=f"{member.mention} {mention_str}",
-        embed=_make_embed(text, 0x2b2d31),
+        embed=_make_embed(text, 0x5865F2),
         view=TicketControlView(),
     )
 
     await _reply_v2(
         interaction,
-        f"{e('arrow')} **Ticket opened.**\nHead to your private channel: [{channel.name}]({channel.jump_url})",
+        f"**Ticket #{ticket_num_str} opened.**\nHead to your private channel: [{channel.name}]({channel.jump_url})",
         color=0x57F287,
     )
 
@@ -856,9 +1217,10 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         webhook_key="wh_tickets_opened",
         thumbnail_url=str(member.display_avatar.url),
         fields=[
-            {"name": "Category",      "value": cat_info["label"],                            "inline": True},
-            {"name": "Channel",       "value": f"[#{channel.name}]({channel.jump_url})",     "inline": True},
-            {"name": "Account Age",   "value": f"{account_age:,} days",                      "inline": True},
+            {"name": "Ticket",        "value": f"#{ticket_num_str}",                                "inline": True},
+            {"name": "Category",      "value": cat_info["label"],                                   "inline": True},
+            {"name": "Channel",       "value": f"[#{channel.name}]({channel.jump_url})",            "inline": True},
+            {"name": "Account Age",   "value": f"{account_age:,} days",                             "inline": True},
             {"name": "Joined Server", "value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown", "inline": True},
         ],
         footer=f"User ID: {member.id}",
@@ -868,13 +1230,16 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
 async def _dm_ticket_closed(
     channel: discord.TextChannel,
     closed_by: discord.Member,
-    transcript: str,
+    html_transcript: str,
+    ticket_num_str: str,
+    cat_label: str,
+    duration_str: str,
+    close_reason: str,
 ) -> None:
-    """DM the ticket opener when their ticket is closed, with a transcript file."""
+    """DM the ticket opener when their ticket is closed, with an HTML transcript."""
     if not channel.topic:
         return
-    # Channel topic is set as: "{cat_label} | {member} ({member.id})"
-    match = re.search(r'\((\d+)\)\s*$', channel.topic)
+    match = re.search(r'\((\d+)\)', channel.topic)
     if not match:
         return
 
@@ -884,23 +1249,23 @@ async def _dm_ticket_closed(
         if not opener:
             return
 
-        # Parse category label from topic
-        cat_label = channel.topic.split(" | ")[0] if " | " in channel.topic else "Unknown"
-
         summary = (
-            f"## Ticket Closed\n\n"
-            f"**Channel** {channel.name}\n"
+            f"## Ticket Closed - #{ticket_num_str}\n\n"
             f"**Category** {cat_label}\n"
-            f"**Closed by** {closed_by}\n\n"
-            "Your full conversation transcript is attached."
+            f"**Channel** #{channel.name}\n"
+            f"**Closed by** {closed_by.name}\n"
+            f"**Duration** {duration_str}\n"
+            f"**Reason** {close_reason}\n\n"
+            "Your full conversation transcript is attached as an HTML file. "
+            "Open it in your browser to view it."
         )
 
         file = discord.File(
-            io.BytesIO(transcript.encode("utf-8")),
-            filename=f"transcript-{channel.name}.txt",
+            io.BytesIO(html_transcript.encode("utf-8")),
+            filename=f"transcript-{channel.name}.html",
         )
-        await opener.send(embed=_make_embed(summary, 0x2b2d31), file=file)
-        log.info("DMed transcript to %s (%d) for %s", opener, opener_id, channel.name)
+        await opener.send(embed=_make_embed(summary, 0x5865F2), file=file)
+        log.info("DMed HTML transcript to %s (%d) for %s", opener, opener_id, channel.name)
 
     except discord.Forbidden:
         log.info("Cannot DM ticket opener %s - DMs are disabled", match.group(1))
@@ -908,103 +1273,146 @@ async def _dm_ticket_closed(
         log.warning("Failed to DM ticket opener: %s", exc)
 
 
-async def close_ticket(interaction: discord.Interaction):
+async def close_ticket(interaction: discord.Interaction, reason: str = "No reason provided"):
     channel = interaction.channel
     admin_role = interaction.guild.get_role(CONFIG["admin_role_id"])
     is_admin = admin_role and admin_role in interaction.user.roles
 
-    if not is_admin and not channel.name.startswith("ticket-"):
-        await _reply_v2(interaction, f"{e('cross')} You cannot close this ticket.", color=0xED4245)
+    # Check the channel looks like a ticket channel (has a topic with user ID)
+    is_ticket_channel = channel.topic and re.search(r'\((\d+)\)', channel.topic)
+    if not is_admin and not is_ticket_channel:
+        await _reply_v2(interaction, "You cannot close this ticket.", color=0xED4245)
         return
 
-    await interaction.response.send_message("Closing ticket in 5 seconds...")
+    # Acknowledge immediately with a closing embed inside the channel
+    close_embed = _make_embed(
+        f"## Ticket Closing\n\n"
+        f"**Closed by** {interaction.user.mention}\n"
+        f"**Reason** {reason}\n\n"
+        "-# Collecting transcript and deleting channel...",
+        0xED4245,
+    )
+    await interaction.response.send_message(embed=close_embed)
 
-    # Collect full transcript - include ALL messages (bot + user) for complete context
-    all_msgs   = []
-    user_msgs  = []
-    first_msg_ts = None
-    async for msg in channel.history(limit=500, oldest_first=True):
-        ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+    # --- Parse topic metadata ---
+    # Topic format: "{cat_label} | {username} ({user_id}) | #{ticket_num} | Claimed:{staff_id}"
+    cat_label      = "Unknown"
+    opener_mention = "Unknown"
+    opener_name    = "Unknown"
+    opener_avatar  = None
+    ticket_num_str = "????"
+
+    if channel.topic and " | " in channel.topic:
+        parts = channel.topic.split(" | ")
+        cat_label = parts[0].strip()
+
+    uid_match = re.search(r'\((\d+)\)', channel.topic or "")
+    if uid_match:
+        opener_id  = int(uid_match.group(1))
+        opener_obj = channel.guild.get_member(opener_id)
+        if opener_obj:
+            opener_mention = f"{opener_obj.mention} `{opener_obj.name}` (`{opener_id}`)"
+            opener_name    = opener_obj.name
+            opener_avatar  = str(opener_obj.display_avatar.url)
+        else:
+            opener_mention = f"<@{opener_id}> (`{opener_id}`)"
+            opener_name    = str(opener_id)
+
+    num_match = re.search(r'#(\d{4,})', channel.topic or "")
+    if num_match:
+        ticket_num_str = num_match.group(1)
+
+    # --- Collect ALL messages for the HTML transcript ---
+    all_messages   = []
+    user_msgs_txt  = []
+    first_msg_ts   = None
+    async for msg in channel.history(limit=1000, oldest_first=True):
+        all_messages.append(msg)
         if first_msg_ts is None:
             first_msg_ts = msg.created_at
-        content = msg.content or ("[embed]" if msg.embeds else "[attachment]" if msg.attachments else "[no content]")
-        tag  = "BOT " if msg.author.bot else "USER"
-        line = f"[{ts}] [{tag}] {msg.author.display_name}: {content}"
-        all_msgs.append(line)
         if not msg.author.bot and msg.content:
-            user_msgs.append(f"[{ts}] {msg.author.display_name}: {content}")
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            user_msgs_txt.append(f"[{ts}] {msg.author.display_name}: {msg.content}")
 
-    total_count = len(all_msgs)
-    user_count  = len(user_msgs)
-    transcript  = "\n".join(all_msgs) if all_msgs else "No messages recorded."
+    total_count = len(all_messages)
+    user_count  = len(user_msgs_txt)
 
-    # Parse ticket opener from channel topic: "{cat_label} | {username} ({user_id})"
-    opener_mention = "Unknown"
-    opener_avatar  = None
-    cat_label      = "Unknown"
-    if channel.topic and " | " in channel.topic:
-        cat_label = channel.topic.split(" | ")[0]
-        uid_match = re.search(r'\((\d+)\)\s*$', channel.topic)
-        if uid_match:
-            opener_id  = int(uid_match.group(1))
-            opener_obj = channel.guild.get_member(opener_id)
-            if opener_obj:
-                opener_mention = f"{opener_obj.mention} `{opener_obj.name}` (`{opener_id}`)"
-                opener_avatar  = str(opener_obj.display_avatar.url)
-            else:
-                opener_mention = f"<@{opener_id}> (`{opener_id}`)"
-
-    # Duration calculation
+    # --- Duration ---
     duration_str = "Unknown"
+    opened_at_str = "Unknown"
     if first_msg_ts:
         delta = datetime.now(timezone.utc) - first_msg_ts
         h, rem = divmod(int(delta.total_seconds()), 3600)
         m = rem // 60
-        duration_str = f"{h}h {m}m" if h else f"{m}m"
+        duration_str  = f"{h}h {m}m" if h else f"{m}m"
+        opened_at_str = first_msg_ts.strftime("%Y-%m-%d %H:%M UTC")
 
-    # Ticket closed log
+    # --- Build HTML transcript ---
+    html_transcript = _build_html_transcript(
+        messages     = all_messages,
+        channel_name = channel.name,
+        opener_name  = opener_name,
+        closed_by_name = interaction.user.name,
+        cat_label    = cat_label,
+        ticket_num_str = ticket_num_str,
+        duration_str = duration_str,
+        opened_at    = opened_at_str,
+    )
+
+    # --- Ticket Closed log ---
     await send_log(
         title="Ticket Closed",
         description=(
             f"**Opened by** {opener_mention}\n"
-            f"**Closed by** {interaction.user.mention} `{interaction.user.name}`"
+            f"**Closed by** {interaction.user.mention} `{interaction.user.name}`\n"
+            f"**Reason** {reason}"
         ),
         color=0xED4245,
         webhook_key="wh_tickets_closed",
         thumbnail_url=opener_avatar,
         fields=[
-            {"name": "Category",  "value": cat_label,                                        "inline": True},
-            {"name": "Channel",   "value": f"#{channel.name}",                               "inline": True},
-            {"name": "Duration",  "value": duration_str,                                     "inline": True},
-            {"name": "Messages",  "value": f"{user_count} user / {total_count} total",       "inline": True},
+            {"name": "Ticket",    "value": f"#{ticket_num_str}",                                 "inline": True},
+            {"name": "Category",  "value": cat_label,                                            "inline": True},
+            {"name": "Channel",   "value": f"#{channel.name}",                                   "inline": True},
+            {"name": "Duration",  "value": duration_str,                                         "inline": True},
+            {"name": "Messages",  "value": f"{user_count} user / {total_count} total",           "inline": True},
         ],
-        footer=f"Channel: {channel.name}",
+        footer=f"User ID: {uid_match.group(1) if uid_match else 'Unknown'}",
     )
 
-    # Transcript log - show user messages as preview, full log in DM
-    preview_lines = user_msgs[-20:] if user_msgs else ["No user messages in this ticket."]
+    # --- Transcript log - preview only, HTML in DM ---
+    preview_lines = user_msgs_txt[-15:] if user_msgs_txt else ["No user messages in this ticket."]
     preview       = "\n".join(preview_lines)
     await send_log(
-        title=f"Transcript - #{channel.name}",
+        title=f"Transcript - {channel.name}",
         description=f"```\n{preview[:1800]}\n```",
         color=0x5865F2,
         webhook_key="wh_ticket_transcripts",
         fields=[
-            {"name": "Total Messages", "value": str(total_count), "inline": True},
-            {"name": "User Messages",  "value": str(user_count),  "inline": True},
-            {"name": "Full Transcript","value": "Sent via DM to ticket opener", "inline": True},
+            {"name": "Ticket",         "value": f"#{ticket_num_str}", "inline": True},
+            {"name": "Total Messages", "value": str(total_count),      "inline": True},
+            {"name": "User Messages",  "value": str(user_count),       "inline": True},
+            {"name": "Full Transcript","value": "HTML file sent via DM to opener", "inline": False},
         ],
         footer=f"Category: {cat_label}",
     )
 
-    # DM the ticket opener with the full transcript as a file
-    await _dm_ticket_closed(channel, interaction.user, transcript)
+    # --- DM opener with HTML transcript file ---
+    await _dm_ticket_closed(
+        channel        = channel,
+        closed_by      = interaction.user,
+        html_transcript = html_transcript,
+        ticket_num_str = ticket_num_str,
+        cat_label      = cat_label,
+        duration_str   = duration_str,
+        close_reason   = reason,
+    )
 
-    # Stash cat_id before the channel is deleted (we need it for cleanup)
+    # Stash cat_id before the channel is deleted
     closing_cat_id = _cat_id_for_channel(channel)
 
-    await asyncio.sleep(5)
-    await channel.delete(reason=f"Ticket closed by {interaction.user}")
+    await asyncio.sleep(3)
+    await channel.delete(reason=f"Ticket #{ticket_num_str} closed by {interaction.user}: {reason}")
 
     # Delete the category if it is now empty
     if closing_cat_id:
