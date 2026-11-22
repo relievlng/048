@@ -47,6 +47,31 @@ def _load_webhooks_env(path: str = "/data/webhooks.env") -> int:
 
 _webhooks_loaded = _load_webhooks_env()
 
+# Env key -> CONFIG key mapping, used to sync CONFIG from env after a live reload
+_WEBHOOK_ENV_MAP: dict[str, str] = {
+    "WEBHOOK_CUSTOMER_VERIFICATIONS":  "wh_verifications",
+    "WEBHOOK_CUSTOMER_HWID_RESETS":    "wh_hwid_resets",
+    "WEBHOOK_CUSTOMER_TICKETS_OPENED": "wh_tickets_opened",
+    "WEBHOOK_CUSTOMER_TICKETS_CLOSED": "wh_tickets_closed",
+    "WEBHOOK_CUSTOMER_TICKET_TRANSCRIPTS": "wh_ticket_transcripts",
+    "WEBHOOK_CUSTOMER_KEY_GENERATED":  "wh_key_generated",
+    "WEBHOOK_CUSTOMER_BANS":           "wh_bans",
+    "LOG_WEBHOOK_URL":                 "log_webhook_url",
+}
+
+def _refresh_webhook_config() -> None:
+    """
+    Re-read /data/webhooks.env and push any new URLs into CONFIG.
+    Safe to call repeatedly. Handles the case where the staff bot
+    writes webhooks.env AFTER the customer bot started (CONFIG has
+    empty strings from the initial env snapshot; this fixes that).
+    """
+    _load_webhooks_env()  # sets os.environ for any missing/empty keys
+    for env_key, cfg_key in _WEBHOOK_ENV_MAP.items():
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            CONFIG[cfg_key] = val  # always overwrite - file is ground truth
+
 def env(key: str, default=None):
     return os.environ.get(key, default)
 
@@ -195,9 +220,10 @@ async def send_log(
     Send an embed log to the appropriate staff Discord channel via webhook.
     Uses standard Discord embed format (webhooks don't support Components v2).
     """
+    _refresh_webhook_config()
     url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
     if not url:
-        log.debug("send_log: no webhook URL for key=%s - skipping", webhook_key)
+        log.warning("send_log: no webhook URL for key=%s - check webhooks.env or staff bot /setup", webhook_key)
         return
 
     embed: dict = {
@@ -1278,6 +1304,7 @@ async def lookup_cmd(interaction: discord.Interaction, user: discord.Member):
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
 async def test_logs_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+    _refresh_webhook_config()  # pull latest URLs from webhooks.env before testing
     results = []
     test_keys = {
         "wh_verifications":      "Verifications",
