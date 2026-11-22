@@ -1619,6 +1619,10 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
                 ticket = conn.execute(
                     "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
                 ).fetchone()
+                # Debug: log total ticket count so we can confirm DB is shared
+                total = conn.execute("SELECT COUNT(*) FROM void_tickets").fetchone()[0]
+                log.info("Verify attempt user=%s invoice=%s db_ticket_count=%d found=%s",
+                         member.id, invoice_id, total, ticket is not None)
         except Exception as ex:
             log.error("DB error during verification user=%s: %s", member.id, ex)
             await interaction.followup.send(
