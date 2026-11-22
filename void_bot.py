@@ -750,20 +750,57 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         log.info("Opened ticket %04d (%s) for %s", num, category_id, interaction.user.id)
 
 
-class ConfirmPaymentModal(discord.ui.Modal, title="Confirm Payment"):
-    product_input = discord.ui.TextInput(
-        label="Product",
-        placeholder="public or private",
-        max_length=10,
-        style=discord.TextStyle.short,
-    )
-    duration_input = discord.ui.TextInput(
-        label="Duration",
-        placeholder="lifetime / 1month / 3months / 1year",
-        default="lifetime",
-        max_length=20,
-        style=discord.TextStyle.short,
-    )
+# ----- Confirm Payment: dropdown selects -> notes modal -----
+
+class _ProductSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select product...",
+            options=[
+                discord.SelectOption(label="Public",  value="public"),
+                discord.SelectOption(label="Private", value="private"),
+            ],
+            row=0,
+        )
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+
+class _DurationSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select duration...",
+            options=[
+                discord.SelectOption(label="Lifetime", value="lifetime"),
+                discord.SelectOption(label="1 Month",  value="1month"),
+                discord.SelectOption(label="3 Months", value="3months"),
+                discord.SelectOption(label="1 Year",   value="1year"),
+            ],
+            row=1,
+        )
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+
+class ConfirmPaymentSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        self.prod_select = _ProductSelect()
+        self.dur_select  = _DurationSelect()
+        self.add_item(self.prod_select)
+        self.add_item(self.dur_select)
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, row=2)
+    async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        product  = self.prod_select.values[0] if self.prod_select.values else None
+        duration = self.dur_select.values[0]  if self.dur_select.values  else "lifetime"
+        if not product:
+            await interaction.response.send_message("Select a product first.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ConfirmPaymentNotesModal(product, duration))
+
+
+class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
     notes_input = discord.ui.TextInput(
         label="Notes (optional)",
         placeholder="payment method, amount paid, etc.",
@@ -771,6 +808,11 @@ class ConfirmPaymentModal(discord.ui.Modal, title="Confirm Payment"):
         max_length=200,
         style=discord.TextStyle.paragraph,
     )
+
+    def __init__(self, product: str, duration: str):
+        super().__init__()
+        self.product  = product
+        self.duration = duration
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -793,19 +835,8 @@ class ConfirmPaymentModal(discord.ui.Modal, title="Confirm Payment"):
 
         user_id = int(ticket["user_id"])
 
-        prod = self.product_input.value.strip().lower()
-        if prod not in ("public", "private"):
-            await interaction.followup.send(
-                "Product must be `public` or `private`.", ephemeral=True
-            )
-            return
-
-        dur = self.duration_input.value.strip().lower().replace(" ", "")
-        if dur not in DURATION_MAP:
-            await interaction.followup.send(
-                f"Invalid duration. Choose: {', '.join(DURATION_MAP.keys())}", ephemeral=True
-            )
-            return
+        prod = self.product
+        dur  = self.duration
 
         delta     = DURATION_MAP[dur]
         exp_iso   = None
@@ -958,7 +989,11 @@ class TicketControlView(discord.ui.View):
                 "This button is for purchase tickets only.", ephemeral=True
             )
             return
-        await interaction.response.send_modal(ConfirmPaymentModal())
+        await interaction.response.send_message(
+            "Select the product and duration, then click Continue.",
+            view=ConfirmPaymentSelectView(),
+            ephemeral=True,
+        )
 
     @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary,
                        custom_id="void_ticket_claim", emoji="\U0001f4cc")
