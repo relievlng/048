@@ -13,7 +13,9 @@ import asyncio
 import aiohttp
 import os
 import re
-from datetime import datetime, timezone
+import secrets
+import string
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -35,13 +37,19 @@ CONFIG = {
     "guild_id":            env_int("VOID_GUILD_ID"),
     "staff_role_id":       env_int("VOID_STAFF_ROLE_ID"),
     "admin_role_id":       env_int("VOID_ADMIN_ROLE_ID"),
-    "ticket_category_id":  env_int("VOID_TICKET_CATEGORY_ID"),
+    "ticket_category_id":  env_int("VOID_TICKET_CATEGORY_ID"),   # fallback if per-cat not set
+    "ticket_cat_support":  env_int("VOID_TICKET_CAT_SUPPORT"),
+    "ticket_cat_purchase": env_int("VOID_TICKET_CAT_PURCHASE"),
+    "ticket_cat_management": env_int("VOID_TICKET_CAT_MANAGEMENT"),
+    "ticket_cat_media":    env_int("VOID_TICKET_CAT_MEDIA"),
     "verified_role_id":    env_int("VOID_VERIFIED_ROLE_ID"),
     "logo_url":            env("VOID_LOGO_URL",                 ""),
     "brand_name":          env("VOID_BRAND_NAME",               "Void"),
-    "customer_cl_webhook": env("VOID_CUSTOMER_CHANGELOG_WEBHOOK", ""),
-    "db_path":             env("DB_PATH",                       "/data/keylock.db"),
-    "api_port":            env_int("VOID_PORT", env_int("PORT", 8081)),
+    "customer_cl_webhook":  env("VOID_CUSTOMER_CHANGELOG_WEBHOOK", ""),
+    "db_path":              env("DB_PATH",                       "/data/keylock.db"),
+    "api_port":             env_int("VOID_PORT", env_int("PORT", 8081)),
+    "customer_guild_id":    env_int("VOID_CUSTOMER_GUILD_ID"),
+    "key_prefix":           env("VOID_KEY_PREFIX", "VD"),
 }
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
@@ -112,6 +120,8 @@ def init_db(path: str) -> sqlite3.Connection:
         "ALTER TABLE key_pool ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
         "ALTER TABLE users ADD COLUMN fac_reset_auth INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN fac_auth_key TEXT",
+        "ALTER TABLE void_tickets ADD COLUMN invoice_id TEXT",
+        "ALTER TABLE void_tickets ADD COLUMN paid_at TEXT",
     ]:
         try:
             conn.execute(migration)
@@ -125,6 +135,54 @@ DB: sqlite3.Connection = None
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+# ─── KEY / INVOICE UTILITIES ──────────────────────────────────────────────────
+
+def _gen_key(prefix: str = "VD") -> str:
+    charset = string.ascii_uppercase + string.digits
+    parts = ["".join(secrets.choice(charset) for _ in range(5)) for _ in range(4)]
+    return f"{prefix}-" + "-".join(parts)
+
+def _gen_invoice_id() -> str:
+    charset = string.ascii_uppercase + string.digits
+    parts = ["".join(secrets.choice(charset) for _ in range(4)) for _ in range(4)]
+    return "VD-" + "-".join(parts)
+
+async def _in_customer_or_void(client: discord.Client, user_id: int) -> tuple[bool, str]:
+    """
+    Check if user_id is a member of the void Discord or customer Discord.
+    Returns (found: bool, reason: str).
+    Gracefully skips any guild the bot is not in.
+    """
+    void_gid     = CONFIG.get("guild_id", 0)
+    customer_gid = CONFIG.get("customer_guild_id", 0)
+    checked = False
+    for gid in filter(None, [void_gid, customer_gid]):
+        guild = client.get_guild(gid)
+        if not guild:
+            continue
+        checked = True
+        try:
+            member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+            if member:
+                return True, f"member of {guild.name}"
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            log.warning("Member check failed guild=%s user=%s: %s", gid, user_id, e)
+    if not checked:
+        return True, "guilds not reachable - skipping check"
+    return False, "not a member of void or customer Discord"
+
+DURATION_MAP = {
+    "lifetime": None,
+    "1day":     timedelta(days=1),
+    "1week":    timedelta(weeks=1),
+    "1month":   timedelta(days=30),
+    "3months":  timedelta(days=90),
+    "6months":  timedelta(days=180),
+    "1year":    timedelta(days=365),
+}
 
 # ─── EMOJI SYSTEM ─────────────────────────────────────────────────────────────
 
@@ -271,24 +329,32 @@ async def _post_webhook_v2(webhook_url: str, payload: dict) -> None:
 
 TICKET_CATEGORIES = {
     "support": {
-        "label":     "Support",
-        "desc":      "Product support or general enquiries",
-        "emoji_key": "ticket",
+        "label":      "Support",
+        "desc":       "Product support or general enquiries",
+        "emoji_key":  "ticket",
+        "config_key": "ticket_cat_support",
+        "cat_name":   "Support Tickets",
     },
     "purchase": {
-        "label":     "Purchase",
-        "desc":      "Purchase or renew your subscription",
-        "emoji_key": "key",
+        "label":      "Purchase",
+        "desc":       "Purchase or renew your subscription",
+        "emoji_key":  "key",
+        "config_key": "ticket_cat_purchase",
+        "cat_name":   "Purchase Tickets",
     },
     "management": {
-        "label":     "Management",
-        "desc":      "Management help and escalations",
-        "emoji_key": "shield",
+        "label":      "Management",
+        "desc":       "Management help and escalations",
+        "emoji_key":  "shield",
+        "config_key": "ticket_cat_management",
+        "cat_name":   "Management Tickets",
     },
     "media": {
-        "label":     "Media",
-        "desc":      "Media enquiries",
-        "emoji_key": "arrow",
+        "label":      "Media",
+        "desc":       "Media enquiries",
+        "emoji_key":  "arrow",
+        "config_key": "ticket_cat_media",
+        "cat_name":   "Media Tickets",
     },
 }
 
@@ -360,13 +426,13 @@ def _ticket_panel_payload() -> dict:
     em_ticket = _emoji_in_text("ticket")
     em_dot    = _emoji_in_text("dot")
     pfx    = f"{em_ticket} " if em_ticket else "\U0001f3ab "
-    bullet = f"{em_dot} "   if em_dot   else "- "
+    bullet = f"{em_dot} "   if em_dot    else "• "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {pfx}Void Tickets\n"
-        "-# Choose a category. A private channel opens and staff meet you there."
+        "Select a category below to open a private ticket channel with staff."
     )})
     body.append({"type": 14})
 
@@ -401,7 +467,7 @@ def _product_panel_payload(product_id: str) -> dict:
     prod_pfx = f"{em_prod} "  if em_prod  else ""
 
     # Header: emoji inline with ## heading, brand tag as subtext
-    header_txt = f"## {prod_pfx}{p['label']}\n-# {brand.upper()} - {p['tag']}"
+    header_txt = f"## {prod_pfx}{p['label']}\n{brand.upper()} - {p['tag']}"
 
     body: list = []
     body.extend(_v2_banner())
@@ -479,7 +545,7 @@ def _payment_panel_payload() -> dict:
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {pfx}Payment Methods\n"
-        "-# All prices are in USD only."
+        "All prices are in USD only."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
@@ -497,38 +563,38 @@ def _payment_panel_payload() -> dict:
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        "-# Have a question about another payment method? Open a support ticket."
+        "Have a question about another payment method? Open a support ticket."
     )})
     return _v2_container(body, accent=0x57F287)
 
 
 def _verify_panel_payload() -> dict:
     em_lock   = _emoji_in_text("lock")
-    em_key    = _emoji_in_text("key")
+    em_ticket = _emoji_in_text("ticket")
     em_verify = _emoji_in_text("verify")
     em_dot    = _emoji_in_text("dot")
     lock_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
-    key_pfx    = f"{em_key} "    if em_key    else "\U0001f511 "
+    ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f39f "
     verify_pfx = f"{em_verify} " if em_verify else ""
-    bullet     = f"{em_dot} "    if em_dot    else "- "
+    bullet     = f"{em_dot} "    if em_dot    else "• "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Link your license key to unlock full access to this server."
+        "Enter your Invoice ID to unlock access and get set up."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        f"{key_pfx}**HOW IT WORKS**\n"
-        f"{bullet}Your license key is linked permanently to your Discord account.\n"
-        f"{bullet}One key per account - keys are non-transferable.\n"
-        f"{bullet}Click the button below to begin verification."
+        f"{ticket_pfx}**HOW IT WORKS**\n"
+        f"{bullet}After purchase, staff will DM you an Invoice ID.\n"
+        f"{bullet}Enter that Invoice ID here to verify your purchase.\n"
+        f"{bullet}Use the same Invoice ID to re-verify at any time."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**VERIFY YOUR LICENSE**\n"
-        f"{bullet}Have your license key ready before clicking.",
+        f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
+        f"{bullet}Have your Invoice ID ready before clicking.",
         "Verify",
         "void_verify_button",
         btn_emoji_name="verify",
@@ -596,18 +662,25 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         guild = interaction.guild
         num   = await _next_ticket_number(guild.id)
 
-        # Resolve ticket category channel
+        # Resolve ticket category channel - per-category first, then global fallback
         ticket_cat = None
-        cat_id_cfg = CONFIG.get("ticket_category_id", 0)
-        if cat_id_cfg:
-            ticket_cat = guild.get_channel(cat_id_cfg)
+        per_cat_id = CONFIG.get(cat.get("config_key", ""), 0)
+        if per_cat_id:
+            ticket_cat = guild.get_channel(per_cat_id)
         if not ticket_cat:
+            fallback_id = CONFIG.get("ticket_category_id", 0)
+            if fallback_id:
+                ticket_cat = guild.get_channel(fallback_id)
+        if not ticket_cat:
+            # Auto-find or create a category matching this ticket type
+            cat_name = cat.get("cat_name", f"{cat['label']} Tickets")
             for c in guild.categories:
-                if c.name.upper() in ("TICKETS", "TICKET", "VOID TICKETS"):
+                if c.name.upper() == cat_name.upper():
                     ticket_cat = c
                     break
         if not ticket_cat:
-            ticket_cat = await guild.create_category("TICKETS")
+            cat_name = cat.get("cat_name", "Tickets")
+            ticket_cat = await guild.create_category(cat_name)
 
         # Permissions
         overwrites = {
@@ -663,11 +736,13 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         payload = _v2_container(body, accent=0x5865F2)
         await _post_channel_v2(channel, payload)
 
-        # Ping row with control buttons
-        mention_parts = [interaction.user.mention]
+        # Ping the user and staff role, then post control buttons
+        ping_parts = [interaction.user.mention]
         if staff_role_id:
-            mention_parts.append(f"<@&{staff_role_id}>")
-        await channel.send(content=" ".join(mention_parts), view=TicketControlView())
+            ping_parts.append(f"<@&{staff_role_id}>")
+        elif admin_role_id:
+            ping_parts.append(f"<@&{admin_role_id}>")
+        await channel.send(content=" ".join(ping_parts), view=TicketControlView())
 
         await interaction.followup.send(
             f"Your ticket has been opened: {channel.mention}", ephemeral=True
@@ -675,9 +750,215 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         log.info("Opened ticket %04d (%s) for %s", num, category_id, interaction.user.id)
 
 
+class ConfirmPaymentModal(discord.ui.Modal, title="Confirm Payment"):
+    product_input = discord.ui.TextInput(
+        label="Product",
+        placeholder="public or private",
+        max_length=10,
+        style=discord.TextStyle.short,
+    )
+    duration_input = discord.ui.TextInput(
+        label="Duration",
+        placeholder="lifetime / 1month / 3months / 1year",
+        default="lifetime",
+        max_length=20,
+        style=discord.TextStyle.short,
+    )
+    notes_input = discord.ui.TextInput(
+        label="Notes (optional)",
+        placeholder="payment method, amount paid, etc.",
+        required=False,
+        max_length=200,
+        style=discord.TextStyle.paragraph,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        channel = interaction.channel
+
+        ticket = DB.execute(
+            "SELECT * FROM void_tickets WHERE channel_id=? AND status='open'",
+            (str(channel.id),)
+        ).fetchone()
+        if not ticket:
+            await interaction.followup.send("No open ticket found in this channel.", ephemeral=True)
+            return
+
+        if ticket["invoice_id"]:
+            await interaction.followup.send(
+                f"Payment already confirmed for this ticket. Invoice: `{ticket['invoice_id']}`",
+                ephemeral=True,
+            )
+            return
+
+        user_id = int(ticket["user_id"])
+
+        prod = self.product_input.value.strip().lower()
+        if prod not in ("public", "private"):
+            await interaction.followup.send(
+                "Product must be `public` or `private`.", ephemeral=True
+            )
+            return
+
+        dur = self.duration_input.value.strip().lower().replace(" ", "")
+        if dur not in DURATION_MAP:
+            await interaction.followup.send(
+                f"Invalid duration. Choose: {', '.join(DURATION_MAP.keys())}", ephemeral=True
+            )
+            return
+
+        delta     = DURATION_MAP[dur]
+        exp_iso   = None
+        exp_label = "Lifetime"
+        if delta:
+            exp_dt    = datetime.now(timezone.utc) + delta
+            exp_iso   = exp_dt.isoformat()
+            exp_label = exp_dt.strftime("%Y-%m-%d")
+
+        # Guild membership check
+        in_guild, check_reason = await _in_customer_or_void(bot, user_id)
+        if not in_guild:
+            await interaction.followup.send(
+                f"<@{user_id}> is not a member of the void or customer Discord. "
+                f"Cannot confirm payment until they join.",
+                ephemeral=True,
+            )
+            return
+
+        # Check for existing license
+        existing = DB.execute(
+            "SELECT key FROM users WHERE discord_id=?", (str(user_id),)
+        ).fetchone()
+        if existing:
+            await interaction.followup.send(
+                f"<@{user_id}> already has a license (`{existing['key']}`). "
+                "Use staff commands to manage it.",
+                ephemeral=True,
+            )
+            return
+
+        # Pull an unclaimed key from pool, or generate one
+        pool_row = DB.execute(
+            "SELECT * FROM key_pool WHERE product=? AND claimed=0 ORDER BY created_at ASC LIMIT 1",
+            (prod,)
+        ).fetchone()
+
+        prefix = CONFIG.get("key_prefix", "VD")
+        if pool_row:
+            key = pool_row["key"]
+        else:
+            key = _gen_key(prefix)
+            DB.execute(
+                "INSERT INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (key, prod, prod, now_iso(), exp_iso, str(interaction.user.id),
+                 "Generated on payment confirm"),
+            )
+
+        invoice_id = _gen_invoice_id()
+        notes_txt  = self.notes_input.value.strip()
+
+        # Link key to Discord ID in users table
+        DB.execute(
+            """INSERT OR IGNORE INTO users
+               (discord_id, key, product, status, registered_at, expires_at, notes)
+               VALUES (?,?,?,?,?,?,?)""",
+            (str(user_id), key, prod, "active", now_iso(), exp_iso,
+             f"Payment confirmed by {interaction.user} - Invoice {invoice_id}"
+             + (f" - {notes_txt}" if notes_txt else "")),
+        )
+        DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (key,))
+
+        # Stamp ticket
+        DB.execute(
+            "UPDATE void_tickets SET invoice_id=?, paid_at=? WHERE channel_id=?",
+            (invoice_id, now_iso(), str(channel.id)),
+        )
+        DB.commit()
+
+        # DM the user
+        try:
+            user_obj = await bot.fetch_user(user_id)
+            dm_embed = discord.Embed(
+                title=f"Payment Confirmed - {CONFIG.get('brand_name', 'Void')}",
+                description=(
+                    "Your payment has been received and your license is ready. "
+                    "Use it in the loader to activate access."
+                ),
+                color=0x2B2D31,
+            )
+            dm_embed.add_field(name="Invoice ID", value=f"`{invoice_id}`", inline=True)
+            dm_embed.add_field(name="Product",    value=f"`{prod}`",       inline=True)
+            dm_embed.add_field(name="Valid For",  value=exp_label,         inline=True)
+            dm_embed.add_field(name="License Key", value=f"```\n{key}\n```", inline=False)
+            dm_embed.set_footer(
+                text="Keep your key private. Do not share it with anyone."
+            )
+            await user_obj.send(embed=dm_embed)
+            dm_sent = True
+        except discord.Forbidden:
+            dm_sent = False
+        except Exception as e:
+            log.warning("Payment DM failed for %s: %s", user_id, e)
+            dm_sent = False
+
+        # Post confirmation panel in ticket channel
+        em_dot  = _emoji_in_text("dot")
+        em_key  = _emoji_in_text("key")
+        bullet  = f"{em_dot} " if em_dot else "- "
+        key_pfx = f"{em_key} " if em_key else ""
+
+        status_lines = [
+            f"{bullet}Invoice ID: `{invoice_id}`",
+            f"{bullet}Product: `{prod}`",
+            f"{bullet}Valid For: {exp_label}",
+            f"{bullet}Key: ||`{key}`||",
+            f"{bullet}DM: {'Sent' if dm_sent else 'Failed - user has DMs disabled'}",
+        ]
+        if notes_txt:
+            status_lines.append(f"{bullet}Notes: {notes_txt}")
+
+        body = [
+            {"type": 10, "content": f"## {key_pfx}Payment Confirmed\n-# By {interaction.user.mention}"},
+            {"type": 14},
+            {"type": 10, "content": "\n".join(status_lines)},
+        ]
+        await _post_channel_v2(channel, _v2_container(body, accent=0x57F287))
+
+        await interaction.followup.send(
+            f"Payment confirmed. Invoice `{invoice_id}` issued.", ephemeral=True
+        )
+        log.info(
+            "Payment confirmed user=%s invoice=%s key=%s... by %s",
+            user_id, invoice_id, key[:8], interaction.user.id,
+        )
+
+
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+
+    @discord.ui.button(label="Confirm Payment", style=discord.ButtonStyle.success,
+                       custom_id="void_ticket_confirm_payment", emoji="\U0001f4b0")
+    async def confirm_payment(self, interaction: discord.Interaction, button: discord.ui.Button):
+        staff_role_id = CONFIG.get("staff_role_id", 0)
+        admin_role_id = CONFIG.get("admin_role_id", 0)
+        is_staff = any(r.id in (staff_role_id, admin_role_id) for r in interaction.user.roles)
+        if not is_staff:
+            await interaction.response.send_message(
+                "Only staff can confirm payments.", ephemeral=True
+            )
+            return
+        ticket = DB.execute(
+            "SELECT * FROM void_tickets WHERE channel_id=? AND status='open'",
+            (str(interaction.channel.id),)
+        ).fetchone()
+        if not ticket or ticket["category"] != "purchase":
+            await interaction.response.send_message(
+                "This button is for purchase tickets only.", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(ConfirmPaymentModal())
 
     @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary,
                        custom_id="void_ticket_claim", emoji="\U0001f4cc")
@@ -730,63 +1011,58 @@ class TicketControlView(discord.ui.View):
 
 # ─── VERIFICATION SYSTEM ──────────────────────────────────────────────────────
 
-class VerifyModal(discord.ui.Modal, title="License Verification"):
-    key_input = discord.ui.TextInput(
-        label="License Key",
-        placeholder="e.g. KL-XXXXX-XXXXX-XXXXX-XXXXX",
+class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
+    invoice_input = discord.ui.TextInput(
+        label="Invoice ID",
+        placeholder="e.g. VD-XXXX-XXXX-XXXX-XXXX",
         min_length=5,
-        max_length=64,
+        max_length=32,
         style=discord.TextStyle.short,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        key     = self.key_input.value.strip().upper()
-        user_id = str(interaction.user.id)
+        invoice_id = self.invoice_input.value.strip().upper()
+        user_id    = str(interaction.user.id)
 
-        already = DB.execute("SELECT discord_id FROM users WHERE discord_id=?", (user_id,)).fetchone()
-        if already:
-            await interaction.followup.send("Your account is already verified.", ephemeral=True)
-            return
+        # Look up the invoice in void_tickets
+        ticket = DB.execute(
+            "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
+        ).fetchone()
 
-        pool_row = DB.execute("SELECT * FROM key_pool WHERE key=? AND claimed=0", (key,)).fetchone()
-        user_row = DB.execute("SELECT * FROM users WHERE key=?", (key,)).fetchone()
-
-        if not pool_row and not user_row:
+        if not ticket:
             await interaction.followup.send(
-                "Invalid or already-claimed key. Check your key and try again.", ephemeral=True
+                "Invoice ID not found. Double-check the ID from your DM and try again.",
+                ephemeral=True,
             )
             return
 
-        if user_row and user_row["discord_id"] != user_id:
+        # Confirm this invoice belongs to the person trying to verify
+        if ticket["user_id"] != user_id:
             await interaction.followup.send(
-                "That key is already linked to another account.", ephemeral=True
+                "That Invoice ID does not match your Discord account.",
+                ephemeral=True,
             )
             return
 
-        if pool_row:
-            DB.execute(
-                """INSERT OR IGNORE INTO users
-                   (discord_id, key, product, status, registered_at, expires_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (user_id, key, pool_row["product"], "active", now_iso(), pool_row["expires_at"])
-            )
-            DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (key,))
-            DB.commit()
-
+        # Assign the verified role (works for first-time and re-setup)
         verified_role_id = CONFIG.get("verified_role_id", 0)
-        if verified_role_id:
+        role_assigned = False
+        if verified_role_id and interaction.guild:
             role = interaction.guild.get_role(verified_role_id)
             if role:
                 try:
-                    await interaction.user.add_roles(role, reason="Verified via Void Bot")
+                    await interaction.user.add_roles(role, reason=f"Verified via Invoice {invoice_id}")
+                    role_assigned = True
                 except Exception as e:
-                    log.warning("Could not assign verified role: %s", e)
+                    log.warning("Could not assign verified role user=%s: %s", user_id, e)
 
+        status_line = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
         await interaction.followup.send(
-            "Your license has been verified. Welcome.", ephemeral=True
+            f"Verification successful. {status_line}",
+            ephemeral=True,
         )
-        log.info("Verified user %s with key %s***", user_id, key[:8])
+        log.info("Verified user=%s invoice=%s role_assigned=%s", user_id, invoice_id, role_assigned)
 
 # ─── CHANGELOG MODAL ──────────────────────────────────────────────────────────
 

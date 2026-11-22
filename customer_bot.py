@@ -454,30 +454,30 @@ def _ticket_panel_payload() -> dict:
 
 def _verify_panel_payload() -> dict:
     em_lock   = _emoji_in_text("lock")
-    em_key    = _emoji_in_text("key")
+    em_ticket = _emoji_in_text("ticket")
     em_verify = _emoji_in_text("verify")
     em_dot    = _emoji_in_text("dot")
     lock_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
-    key_pfx    = f"{em_key} "    if em_key    else "\U0001f511 "
+    ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f39f "
     verify_pfx = f"{em_verify} " if em_verify else ""
     bullet     = f"{em_dot} "    if em_dot    else "• "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Link your license key to unlock full access to this server."
+        "Enter your Invoice ID to unlock access and get set up."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        f"{key_pfx}**HOW IT WORKS**\n"
-        f"{bullet}Your license key is linked permanently to your Discord account.\n"
-        f"{bullet}One key per account - keys are non-transferable.\n"
-        f"{bullet}Click the button below to begin verification."
+        f"{ticket_pfx}**HOW IT WORKS**\n"
+        f"{bullet}After purchase, staff will DM you an Invoice ID.\n"
+        f"{bullet}Enter that Invoice ID here to verify your purchase.\n"
+        f"{bullet}Use the same Invoice ID to re-verify at any time."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**VERIFY YOUR LICENSE**\n"
-        f"{bullet}Have your license key ready before clicking.",
+        f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
+        f"{bullet}Have your Invoice ID ready before clicking.",
         "Verify",
         "verify_button",
         btn_emoji_name="verify",
@@ -1581,60 +1581,58 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
 
 # ─── VERIFICATION VIEW ────────────────────────────────────────────────────────
 
-class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
-    key_input = discord.ui.TextInput(
-        label="License Key",
-        placeholder="e.g. KL-XXXX-XXXX-XXXX",
+class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
+    invoice_input = discord.ui.TextInput(
+        label="Invoice ID",
+        placeholder="e.g. VD-XXXX-XXXX-XXXX-XXXX",
         min_length=5,
-        max_length=50,
+        max_length=32,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        key = self.key_input.value.strip().upper()
-        member = interaction.user
-        guild = interaction.guild
+        invoice_id = self.invoice_input.value.strip().upper()
+        member     = interaction.user
+        guild      = interaction.guild
 
-        row = lookup_key(key)
-        if not row:
+        with get_db() as conn:
+            ticket = conn.execute(
+                "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
+            ).fetchone()
+
+        if not ticket:
             await _reply_v2(
                 interaction,
-                f"{e('cross')} **Invalid key.**\nPlease check your key and try again.",
+                f"{e('cross')} **Invoice ID not found.**\nDouble-check the ID from your DM and try again.",
                 color=0xED4245,
             )
             return
 
-        if row["status"] == "banned":
+        if ticket["user_id"] != str(member.id):
             await _reply_v2(
                 interaction,
-                f"{e('cross')} **This key has been banned.**\nContact staff if you believe this is an error.",
-                color=0xED4245,
-            )
-            return
-
-        ok = register_key_to_discord(key, member.id)
-        if not ok:
-            await _reply_v2(
-                interaction,
-                f"{e('cross')} **This key is already linked to another account.**\nContact staff for assistance.",
+                f"{e('cross')} **Invoice ID does not match your account.**\nContact staff if you believe this is an error.",
                 color=0xED4245,
             )
             return
 
         verified_role = guild.get_role(CONFIG["verified_role_id"])
+        role_assigned = False
         if verified_role and verified_role not in member.roles:
-            await member.add_roles(verified_role, reason="Key verification")
+            try:
+                await member.add_roles(verified_role, reason=f"Invoice verification {invoice_id}")
+                role_assigned = True
+            except Exception as ex:
+                log.warning("Could not assign verified role user=%s: %s", member.id, ex)
+        else:
+            role_assigned = True  # already has role - re-setup case
 
-        expires = row["expires_at"] or "Never"
-        product = row["product"] or "default"
-
+        status_line = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
         await _reply_v2(
             interaction,
             (
                 f"{e('verify')} **Verified successfully.**\n"
-                f"You now have access to the server.\n\n"
-                f"**Key** `{key}`\n"
-                f"**Product** {product}\n"
-                f"**Expires** {expires}"
+                f"{status_line}\n\n"
+                f"**Invoice** `{invoice_id}`"
             ),
             color=0x57F287,
         )
@@ -1650,9 +1648,7 @@ class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
             webhook_key="wh_verifications",
             thumbnail_url=str(member.display_avatar.url),
             fields=[
-                {"name": "Key",          "value": f"`{key}`",         "inline": True},
-                {"name": "Product",      "value": product,            "inline": True},
-                {"name": "Expires",      "value": expires,            "inline": True},
+                {"name": "Invoice ID",   "value": f"`{invoice_id}`",  "inline": True},
                 {"name": "Account Age",  "value": f"{acct_age:,} days","inline": True},
                 {"name": "Joined Server","value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown", "inline": True},
             ],
@@ -1666,14 +1662,7 @@ class VerifyView(discord.ui.View):
 
     @discord.ui.button(label="Verify", style=discord.ButtonStyle.success, custom_id="verify_button")
     async def verify_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        verified_role = interaction.guild.get_role(CONFIG["verified_role_id"])
-        if verified_role and verified_role in interaction.user.roles:
-            await _reply_v2(
-                interaction,
-                f"{e('verify')} You are already verified.",
-                color=0x57F287,
-            )
-            return
+        # Always open the modal - re-verification with the same invoice ID is allowed
         await interaction.response.send_modal(VerifyModal())
 
 # ─── HWID RESET VIEW ──────────────────────────────────────────────────────────

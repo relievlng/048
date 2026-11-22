@@ -53,6 +53,7 @@ CONFIG = {
     "log_webhook_url":     env("LOG_WEBHOOK_URL"),
     "db_path":             env("DB_PATH", "/data/keylock.db"),
     "main_guild_id":       env_int("MAIN_GUILD_ID"),
+    "void_guild_id":       env_int("VOID_GUILD_ID"),
     # keys shared with main bot commands
     "loader_log_channel_id": env_int("LOADER_LOG_CHANNEL_ID"),
     "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
@@ -122,6 +123,47 @@ def audit_staff(action: str, actor_id: str = None, target_id: str = None, detail
         (now_iso(), action, actor_id, target_id, detail)
     )
     DB.commit()
+
+# ─── KEY / HWID UTILITIES ─────────────────────────────────────────────────────
+
+def hash_hwid(raw: str) -> str:
+    return hashlib.sha256(raw.strip().lower().encode()).hexdigest()
+
+def gen_key(prefix: str = "KL", segments: int = 4, seg_len: int = 5) -> str:
+    charset = string.ascii_uppercase + string.digits
+    parts = ["".join(secrets.choice(charset) for _ in range(seg_len)) for _ in range(segments)]
+    return f"{prefix}-" + "-".join(parts)
+
+def gen_fac_key() -> str:
+    charset = string.ascii_uppercase + string.digits
+    token = "".join(secrets.choice(charset) for _ in range(16))
+    return f"FAC-{token[:4]}-{token[4:8]}-{token[8:12]}-{token[12:16]}"
+
+async def _member_in_guilds(bot: "StaffBot", user_id: int, *guild_ids: int) -> tuple[bool, str]:
+    """
+    Check if user_id is a member of any of the given guild IDs.
+    Returns (found: bool, reason: str).
+    Bot must be in those guilds for the check to work.
+    """
+    checked = False
+    for gid in guild_ids:
+        if not gid:
+            continue
+        guild = bot.get_guild(gid)
+        if not guild:
+            continue
+        checked = True
+        try:
+            member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+            if member:
+                return True, f"member of {guild.name}"
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            log.warning("Member check failed guild=%s user=%s: %s", gid, user_id, e)
+    if not checked:
+        return True, "guilds not reachable by this bot - skipping check"
+    return False, "not a member of customer or void Discord"
 
 # ─── EMBED HELPERS ────────────────────────────────────────────────────────────
 
@@ -882,6 +924,24 @@ async def cmd_keygen(i: discord.Interaction,
         exp_iso = exp_dt.isoformat()
         expires_label = exp_dt.strftime("%Y-%m-%d")
 
+    # Guild membership check when delivering to a user
+    if deliver_to:
+        in_guild, reason = await _member_in_guilds(
+            BOT, deliver_to.id,
+            CONFIG.get("main_guild_id", 0),
+            CONFIG.get("void_guild_id", 0),
+        )
+        if not in_guild:
+            await i.followup.send(
+                embed=err_embed(
+                    "Membership Check Failed",
+                    f"{deliver_to.mention} is not a member of the customer or void Discord.\n"
+                    f"Key not generated. Confirm they have joined before delivering a key."
+                ),
+                ephemeral=True,
+            )
+            return
+
     vis = "public" if prod == "public" else "private"
     k = gen_key(CONFIG["key_prefix"])
     DB.execute(
@@ -890,6 +950,25 @@ async def cmd_keygen(i: discord.Interaction,
     )
     DB.commit()
     audit("KEYGEN", actor_id=str(i.user.id), detail=f"product={prod} duration={dur_key}")
+
+    # If delivering, link the key to the user's Discord ID immediately
+    if deliver_to:
+        already = DB.execute(
+            "SELECT key FROM users WHERE discord_id=?", (str(deliver_to.id),)
+        ).fetchone()
+        if not already:
+            fac_key = gen_fac_key()
+            DB.execute(
+                """INSERT OR IGNORE INTO users
+                   (discord_id, key, product, status, registered_at, expires_at, fac_auth_key, notes)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (str(deliver_to.id), k, prod, "active", now_iso(), exp_iso, fac_key,
+                 f"Key delivered by {i.user} via /keygen")
+            )
+            DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (k,))
+            DB.commit()
+            audit("KEY_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+                  detail=f"key={k[:20]} product={prod}")
 
     prod_icon = "🌐" if prod == "public" else "🔒"
     dm_status = None
@@ -913,9 +992,10 @@ async def cmd_keygen(i: discord.Interaction,
         except Exception as e:
             dm_status = f"DM failed - {e}"
 
+    linked_note = " Key linked to Discord ID." if deliver_to else " Key added to pool (unclaimed)."
     result_embed = discord.Embed(
         title="Key Generated",
-        description=f"New `{prod}` key created and added to the pool.",
+        description=f"New `{prod}` key created.{linked_note}",
         color=discord.Color.green(),
     )
     result_embed.add_field(name="Product", value=f"{prod_icon} `{prod}`", inline=True)
