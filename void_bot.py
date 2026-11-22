@@ -773,7 +773,6 @@ class ChangelogModal(discord.ui.Modal, title="Post Changelog"):
 # ─── BOT SETUP ────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
