@@ -178,7 +178,7 @@ def reset_hwid(discord_id: str) -> tuple[bool, str]:
         remaining = max_resets - row["hwid_resets"] - 1
         return True, f"HWID reset successfully. You have **{remaining}** reset(s) remaining."
 
-# ─── WEBHOOK LOGGING (Components v2) ──────────────────────────────────────────
+# ─── WEBHOOK LOGGING ──────────────────────────────────────────────────────────
 
 async def send_log(
     title: str,
@@ -187,36 +187,37 @@ async def send_log(
     fields: list = None,
     webhook_key: str = "log_webhook_url",
 ):
-    """Send a Components v2 container to the appropriate staff log channel."""
+    """
+    Send an embed log to the appropriate staff Discord channel via webhook.
+    Uses standard Discord embed format (webhooks don't support Components v2).
+    """
     url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
     if not url:
+        log.debug("send_log: no webhook URL for key=%s - skipping", webhook_key)
         return
 
-    parts = [f"### {title}", description]
-    if fields:
-        for field in fields:
-            parts.append(f"\n**{field['name']}**\n{field['value']}")
-
-    payload = {
-        "flags": 1 << 15,  # IS_COMPONENTS_V2
-        "components": [
-            {
-                "type": 17,       # Container
-                "accent_color": color,
-                "components": [
-                    {
-                        "type": 10,   # Text Display
-                        "content": "\n".join(parts),
-                    }
-                ],
-            }
-        ],
+    embed: dict = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+    if fields:
+        embed["fields"] = [
+            {"name": f["name"], "value": f["value"], "inline": f.get("inline", False)}
+            for f in fields
+        ]
+
+    payload = {"embeds": [embed]}
+
     try:
         async with aiohttp.ClientSession() as session:
-            await session.post(url, json=payload)
+            async with session.post(url, json=payload) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    log.warning("send_log webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
     except Exception as exc:
-        log.warning(f"Webhook log failed: {exc}")
+        log.warning("send_log failed for key=%s: %s", webhook_key, exc)
 
 # ─── HEALTH SERVER ─────────────────────────────────────────────────────────────
 
