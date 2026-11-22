@@ -197,7 +197,7 @@ def ok_embed(title: str, desc: str = None) -> discord.Embed:
 def warn_embed(title: str, desc: str) -> discord.Embed:
     return discord.Embed(title=title, description=desc, color=discord.Color.orange())
 
-BRAND_COLOR = discord.Color(0x9B59B6)  # Staff brand purple
+BRAND_COLOR = discord.Color(0xFF69B4)  # Staff brand pink
 
 TICKET_COLORS = {
     "hwid_free":  discord.Color.blue(),
