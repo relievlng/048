@@ -595,19 +595,19 @@ def _verify_panel_payload() -> dict:
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Enter your Invoice ID to unlock access and get set up."
+        "Click the button below to unlock access to the server."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}After purchase, staff will DM you an Invoice ID.\n"
-        f"{bullet}Enter that Invoice ID here to verify your purchase.\n"
-        f"{bullet}Use the same Invoice ID to re-verify at any time."
+        f"{bullet}After purchase, your Discord account is linked to your order.\n"
+        f"{bullet}Click Verify and complete the quick spam check.\n"
+        f"{bullet}You can re-verify at any time if you lose your role."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
         f"{verify_pfx}**VERIFY YOUR PURCHASE**\n"
-        f"{bullet}Have your Invoice ID ready before clicking.",
+        f"{bullet}Just click the button - no Invoice ID needed.",
         "Verify",
         "void_verify_button",
         btn_emoji_name="verify",
@@ -1046,58 +1046,66 @@ class TicketControlView(discord.ui.View):
 
 # ─── VERIFICATION SYSTEM ──────────────────────────────────────────────────────
 
-class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
-    invoice_input = discord.ui.TextInput(
-        label="Invoice ID",
-        placeholder="e.g. VD-XXXX-XXXX-XXXX-XXXX",
-        min_length=5,
-        max_length=32,
-        style=discord.TextStyle.short,
-    )
+import random as _random
+
+class VerifyCaptchaModal(discord.ui.Modal):
+    """Click-to-verify with a simple math spam check. No Invoice ID needed."""
+
+    def __init__(self, a: int, b: int):
+        super().__init__(title="Verification - Spam Check")
+        self._answer = a + b
+        self.captcha_input = discord.ui.TextInput(
+            label=f"Quick check: what is {a} + {b}?",
+            placeholder="Enter the number...",
+            min_length=1,
+            max_length=3,
+            style=discord.TextStyle.short,
+        )
+        self.add_item(self.captcha_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        invoice_id = self.invoice_input.value.strip().upper()
-        user_id    = str(interaction.user.id)
+        try:
+            given = int(self.captcha_input.value.strip())
+        except ValueError:
+            await interaction.followup.send("Please enter a number. Click Verify to try again.", ephemeral=True)
+            return
+        if given != self._answer:
+            await interaction.followup.send("Incorrect answer. Click Verify to try again.", ephemeral=True)
+            return
 
-        # Look up the invoice in void_tickets
+        user_id = str(interaction.user.id)
+
+        # Check by Discord ID - tickets first, then payments
         ticket = DB.execute(
-            "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
+            "SELECT invoice_id, product FROM void_tickets WHERE user_id=?", (user_id,)
         ).fetchone()
-
         if not ticket:
-            await interaction.followup.send(
-                "Invoice ID not found. Double-check the ID from your DM and try again.",
-                ephemeral=True,
-            )
-            return
+            payment = DB.execute(
+                "SELECT invoice_id, product FROM payments WHERE discord_id=?", (user_id,)
+            ).fetchone()
+            if not payment:
+                await interaction.followup.send(
+                    "No purchase found for your account. Contact staff if you believe this is wrong.",
+                    ephemeral=True,
+                )
+                return
 
-        # Confirm this invoice belongs to the person trying to verify
-        if ticket["user_id"] != user_id:
-            await interaction.followup.send(
-                "That Invoice ID does not match your Discord account.",
-                ephemeral=True,
-            )
-            return
-
-        # Assign the verified role (works for first-time and re-setup)
+        # Assign verified role
         verified_role_id = CONFIG.get("verified_role_id", 0)
         role_assigned = False
         if verified_role_id and interaction.guild:
             role = interaction.guild.get_role(verified_role_id)
             if role:
                 try:
-                    await interaction.user.add_roles(role, reason=f"Verified via Invoice {invoice_id}")
+                    await interaction.user.add_roles(role, reason="Verified - purchase confirmed")
                     role_assigned = True
-                except Exception as e:
-                    log.warning("Could not assign verified role user=%s: %s", user_id, e)
+                except Exception as ex:
+                    log.warning("Could not assign verified role user=%s: %s", user_id, ex)
 
         status_line = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
-        await interaction.followup.send(
-            f"Verification successful. {status_line}",
-            ephemeral=True,
-        )
-        log.info("Verified user=%s invoice=%s role_assigned=%s", user_id, invoice_id, role_assigned)
+        await interaction.followup.send(f"Verification successful. {status_line}", ephemeral=True)
+        log.info("Verified (captcha) user=%s role_assigned=%s", user_id, role_assigned)
 
 # ─── CHANGELOG MODAL ──────────────────────────────────────────────────────────
 
@@ -1201,7 +1209,9 @@ async def on_interaction(interaction: discord.Interaction):
 
     # Verify button
     if cid == "void_verify_button":
-        await interaction.response.send_modal(VerifyModal())
+        a = _random.randint(1, 9)
+        b = _random.randint(1, 9)
+        await interaction.response.send_modal(VerifyCaptchaModal(a, b))
         return
 
 # ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
