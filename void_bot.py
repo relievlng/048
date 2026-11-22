@@ -100,6 +100,11 @@ def init_db(path: str) -> sqlite3.Connection:
             status      TEXT NOT NULL DEFAULT 'open',
             transcript  TEXT
         );
+        CREATE TABLE IF NOT EXISTS void_panels (
+            key         TEXT PRIMARY KEY,
+            channel_id  TEXT NOT NULL,
+            message_id  TEXT NOT NULL
+        );
     """)
     conn.commit()
     # Migrations
@@ -223,13 +228,37 @@ def _v2_section(text: str, btn_label: str, btn_custom_id: str,
 
 # ─── REST HELPER ──────────────────────────────────────────────────────────────
 
-async def _post_channel_v2(channel: discord.TextChannel, payload: dict) -> None:
+async def _post_channel_v2(channel: discord.TextChannel, payload: dict) -> int | None:
     async with aiohttp.ClientSession() as session:
         url = f"https://discord.com/api/v10/channels/{channel.id}/messages"
         headers = {"Authorization": f"Bot {CONFIG['token']}", "Content-Type": "application/json"}
         async with session.post(url, json=payload, headers=headers) as resp:
             if resp.status not in (200, 201):
                 log.error("Panel post failed %s: %s", resp.status, await resp.text())
+                return None
+            data = await resp.json()
+            return int(data["id"])
+
+async def _edit_message_v2(channel_id: int, message_id: int, payload: dict) -> bool:
+    async with aiohttp.ClientSession() as session:
+        url = f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+        headers = {"Authorization": f"Bot {CONFIG['token']}", "Content-Type": "application/json"}
+        body = {"flags": payload["flags"], "components": payload["components"]}
+        async with session.patch(url, json=body, headers=headers) as resp:
+            if resp.status not in (200, 201):
+                log.error("Panel edit failed %s %s: %s", channel_id, message_id, await resp.text())
+                return False
+            return True
+
+def _save_panel(key: str, channel_id: int, message_id: int) -> None:
+    DB.execute(
+        "INSERT OR REPLACE INTO void_panels (key, channel_id, message_id) VALUES (?,?,?)",
+        (key, str(channel_id), str(message_id)),
+    )
+    DB.commit()
+
+def _get_panels() -> list:
+    return DB.execute("SELECT key, channel_id, message_id FROM void_panels").fetchall()
 
 async def _post_webhook_v2(webhook_url: str, payload: dict) -> None:
     async with aiohttp.ClientSession() as session:
@@ -872,7 +901,9 @@ async def cmd_tickets(interaction: discord.Interaction):
         await interaction.response.send_message("No permission.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await _post_channel_v2(interaction.channel, _ticket_panel_payload())
+    msg_id = await _post_channel_v2(interaction.channel, _ticket_panel_payload())
+    if msg_id:
+        _save_panel("tickets", interaction.channel.id, msg_id)
     await interaction.followup.send("Ticket panel posted.", ephemeral=True)
 
 
@@ -887,7 +918,9 @@ async def cmd_product(interaction: discord.Interaction, product: str):
         await interaction.response.send_message("No permission.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await _post_channel_v2(interaction.channel, _product_panel_payload(product))
+    msg_id = await _post_channel_v2(interaction.channel, _product_panel_payload(product))
+    if msg_id:
+        _save_panel(f"product_{product}", interaction.channel.id, msg_id)
     await interaction.followup.send(f"{product.capitalize()} product panel posted.", ephemeral=True)
 
 
@@ -897,7 +930,9 @@ async def cmd_payment(interaction: discord.Interaction):
         await interaction.response.send_message("No permission.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await _post_channel_v2(interaction.channel, _payment_panel_payload())
+    msg_id = await _post_channel_v2(interaction.channel, _payment_panel_payload())
+    if msg_id:
+        _save_panel("payment", interaction.channel.id, msg_id)
     await interaction.followup.send("Payment panel posted.", ephemeral=True)
 
 
@@ -907,8 +942,66 @@ async def cmd_verify(interaction: discord.Interaction):
         await interaction.response.send_message("No permission.", ephemeral=True)
         return
     await interaction.response.defer(ephemeral=True)
-    await _post_channel_v2(interaction.channel, _verify_panel_payload())
+    msg_id = await _post_channel_v2(interaction.channel, _verify_panel_payload())
+    if msg_id:
+        _save_panel("verify", interaction.channel.id, msg_id)
     await interaction.followup.send("Verification panel posted.", ephemeral=True)
+
+
+@tree.command(name="refresh", description="Force re-upload emojis and update all posted panels in-place", guild=_guild_obj())
+async def cmd_refresh(interaction: discord.Interaction):
+    if not _is_staff(interaction):
+        await interaction.response.send_message("No permission.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    # Force re-upload all emojis from SVGs
+    emoji_updated = 0
+    try:
+        import cairosvg
+        emoji_dir = os.path.join(os.path.dirname(__file__), "emojis")
+        if os.path.isdir(emoji_dir):
+            existing = {e.name: e for e in await guild.fetch_emojis()}
+            for key, filename in _EMOJI_FILE_MAP.items():
+                svg_path = os.path.join(emoji_dir, f"{filename}.svg")
+                if not os.path.isfile(svg_path):
+                    continue
+                try:
+                    if filename in existing:
+                        await existing[filename].delete()
+                    png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
+                    e = await guild.create_custom_emoji(name=filename, image=png_bytes)
+                    EMOJIS[key] = f"<:{e.name}:{e.id}>"
+                    emoji_updated += 1
+                    log.info("Refreshed emoji :%s: (id=%s)", e.name, e.id)
+                except Exception as exc:
+                    log.warning("Emoji refresh failed for %s: %s", key, exc)
+    except ImportError:
+        log.warning("cairosvg not available - skipping emoji re-upload")
+
+    # Edit all stored panel messages in-place
+    panel_map = {
+        "tickets":          _ticket_panel_payload,
+        "payment":          _payment_panel_payload,
+        "verify":           _verify_panel_payload,
+        **{f"product_{pid}": (lambda pid=pid: _product_panel_payload(pid)) for pid in PRODUCTS},
+    }
+    panels = _get_panels()
+    updated, failed = 0, 0
+    for row in panels:
+        fn = panel_map.get(row["key"])
+        if not fn:
+            continue
+        ok = await _edit_message_v2(int(row["channel_id"]), int(row["message_id"]), fn())
+        if ok:
+            updated += 1
+        else:
+            failed += 1
+
+    lines = [f"Emojis re-uploaded: {emoji_updated}/{len(_EMOJI_FILE_MAP)}"]
+    lines.append(f"Panels updated: {updated}/{len(panels)}" + (f" ({failed} failed)" if failed else ""))
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
 @tree.command(name="changelog", description="Post a changelog (also sends to customer Discord)", guild=_guild_obj())
