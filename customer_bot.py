@@ -37,6 +37,11 @@ CONFIG = {
     "setup_pings_role_id":     env_int("SETUP_PINGS_ROLE_ID"),
     "setup_alerts_channel_id": env_int("SETUP_ALERTS_CHANNEL_ID"),
     "ticket_category_id":      env_int("TICKET_CATEGORY_ID"),
+    # Per-ticket-type Discord category channel IDs (auto-created on startup if missing)
+    "ticket_cat_support":      env_int("TICKET_CAT_SUPPORT"),
+    "ticket_cat_setup":        env_int("TICKET_CAT_SETUP"),
+    "ticket_cat_purchase":     env_int("TICKET_CAT_PURCHASE"),
+    "ticket_cat_management":   env_int("TICKET_CAT_MANAGEMENT"),
     "rules_channel_id":        env_int("RULES_CHANNEL_ID"),
     "verify_channel_id":       env_int("VERIFY_CHANNEL_ID"),
     "hwid_channel_id":         env_int("HWID_CHANNEL_ID"),
@@ -447,6 +452,91 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
     return _v2_container(body)
 
 
+# ─── TICKET CATEGORY AUTO-SETUP ──────────────────────────────────────────────
+
+async def _ensure_ticket_categories(guild: discord.Guild) -> None:
+    """
+    Ensure each ticket type has its own Discord category channel.
+    - Reuses an existing category with the matching name.
+    - Creates it (positioned below the main TICKET_CATEGORY_ID) if missing.
+    - Patches CONFIG in-place with the resolved IDs.
+    - Logs TICKET_CAT_* env var values so the user can persist them.
+    """
+    admin_role = guild.get_role(CONFIG["admin_role_id"])
+    base_cat   = guild.get_channel(CONFIG["ticket_category_id"])
+    position   = (base_cat.position + 1) if base_cat else 0
+
+    # Permission overwrites: staff see it, everyone else cannot
+    overwrites: dict = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+    }
+    if admin_role:
+        overwrites[admin_role] = discord.PermissionOverwrite(
+            view_channel=True, manage_channels=True,
+            send_messages=True, read_message_history=True,
+        )
+
+    created_any = False
+    for cat_id, cat in TICKET_CATEGORIES.items():
+        config_key = cat["config_key"]
+        env_var    = config_key.upper().replace("ticket_", "TICKET_")  # -> TICKET_CAT_SUPPORT etc.
+
+        if CONFIG.get(config_key):
+            ch = guild.get_channel(CONFIG[config_key])
+            if ch:
+                log.info("Ticket category %-10s already set -> #%s (%d)", cat["label"], ch.name, ch.id)
+                continue
+            # Stale ID in config - fall through and re-create
+            log.warning("Ticket category %s ID %d not found, re-creating", cat["label"], CONFIG[config_key])
+
+        # Look for an existing category by name
+        discord_name = cat["label"]
+        existing = discord.utils.get(guild.categories, name=discord_name)
+        if existing:
+            CONFIG[config_key] = existing.id
+            log.info("Reused existing category %-15s -> #%s (%d)  (set %s=%d)",
+                     discord_name, existing.name, existing.id, env_var, existing.id)
+            continue
+
+        # Create the Discord category
+        try:
+            new_cat = await guild.create_category(
+                name=discord_name,
+                overwrites=overwrites,
+                position=position,
+                reason="Ticket category auto-setup",
+            )
+            CONFIG[config_key] = new_cat.id
+            created_any = True
+            position += 1
+            log.info("Created Discord category %-15s (%d)  (set %s=%d)",
+                     discord_name, new_cat.id, env_var, new_cat.id)
+        except discord.Forbidden:
+            log.error("Missing Manage Channels permission - cannot create category %s", discord_name)
+            break
+        except discord.HTTPException as exc:
+            log.error("Failed to create category %s: %s", discord_name, exc)
+
+    if created_any:
+        log.info("=" * 60)
+        log.info("TICKET CATEGORIES CREATED - add these env vars to Railway:")
+        for cat_id, cat in TICKET_CATEGORIES.items():
+            val = CONFIG.get(cat["config_key"])
+            if val:
+                env_var = cat["config_key"].upper().replace("ticket_", "TICKET_")
+                log.info("  %s=%d", env_var, val)
+        log.info("=" * 60)
+
+
+def _resolve_ticket_discord_category(guild: discord.Guild, cat_id: str) -> discord.CategoryChannel | None:
+    """Return the Discord category channel for a given ticket type, falling back to the main one."""
+    config_key = TICKET_CATEGORIES[cat_id]["config_key"]
+    ch = guild.get_channel(CONFIG.get(config_key) or 0)
+    if ch:
+        return ch
+    return guild.get_channel(CONFIG["ticket_category_id"])
+
+
 # ─── EMOJI AUTO-SETUP ─────────────────────────────────────────────────────────
 
 EMOJI_SVG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emojis")
@@ -543,10 +633,10 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":    {"label": "Support",            "emoji_key": "ticket",  "desc": "Product support or general enquiries"},
-    "setup":      {"label": "Setup",              "emoji_key": "arrow",   "desc": "First time setup"},
-    "purchase":   {"label": "Purchase / Renewal", "emoji_key": "shield",  "desc": "Purchase or renew"},
-    "management": {"label": "Management",         "emoji_key": "key",     "desc": "Management help"},
+    "support":    {"label": "Support",            "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
+    "setup":      {"label": "Setup",              "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
+    "purchase":   {"label": "Purchase / Renewal", "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
+    "management": {"label": "Management",         "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
 }
 
 class TicketPanelView(discord.ui.View):
@@ -601,7 +691,7 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         return
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
-    ticket_category = guild.get_channel(CONFIG["ticket_category_id"])
+    ticket_category = _resolve_ticket_discord_category(guild, cat_id)
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -866,12 +956,12 @@ async def on_ready():
     bot.add_view(HWIDView())
     bot.add_view(SetupPingsView())
 
-    # Auto-create custom emojis from /emojis/ SVG files
     guild = bot.get_guild(CONFIG["guild_id"])
     if guild:
+        await _ensure_ticket_categories(guild)
         await _setup_emojis(guild)
     else:
-        log.warning("Guild %s not found - skipping emoji setup", CONFIG["guild_id"])
+        log.warning("Guild %s not found - skipping ticket category and emoji setup", CONFIG["guild_id"])
 
     try:
         synced = await bot.tree.sync()
