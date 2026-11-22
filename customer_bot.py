@@ -510,6 +510,8 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
         log.warning("Cached category ID %d for %s is stale, re-resolving", cached_id, cat_name)
 
     # 2. Search the in-memory cache (case-insensitive match)
+    cached_cats = [(c.name, c.id) for c in guild.categories]
+    log.info("Category lookup for %s - cache has %d categories: %s", cat_name, len(cached_cats), cached_cats)
     existing = next(
         (c for c in guild.categories if c.name.lower() == cat_name.lower()),
         None,
@@ -524,6 +526,8 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
     log.info("Category %s not in cache for %s - fetching from API", cat_name, cat_id)
     try:
         all_channels = await guild.fetch_channels()
+        api_cats = [(c.name, c.id) for c in all_channels if isinstance(c, discord.CategoryChannel)]
+        log.info("API fetch returned %d categories: %s", len(api_cats), api_cats)
         existing = next(
             (c for c in all_channels
              if isinstance(c, discord.CategoryChannel) and c.name.lower() == cat_name.lower()),
@@ -775,6 +779,11 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
 
     # Get or create the per-type Discord category on demand
     ticket_category = await _get_or_create_ticket_category(guild, cat_id)
+    log.info(
+        "open_ticket: resolved category for %s = %s",
+        cat_id,
+        f"{ticket_category.name}({ticket_category.id})" if ticket_category else "None - channel will land at top level",
+    )
 
     channel = await guild.create_text_channel(
         name=channel_name,
