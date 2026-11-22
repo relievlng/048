@@ -19,6 +19,30 @@ import threading
 
 # ─── ENV / CONFIG ─────────────────────────────────────────────────────────────
 
+def _load_webhooks_env(path: str = "/data/webhooks.env") -> int:
+    """
+    Read webhook URLs from the shared volume file written by the staff bot.
+    Populates os.environ for any key not already set, so CONFIG picks them up.
+    Returns the number of keys loaded.
+    """
+    if not os.path.isfile(path):
+        return 0
+    loaded = 0
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and val and key not in os.environ:
+                os.environ[key] = val
+                loaded += 1
+    return loaded
+
+_webhooks_loaded = _load_webhooks_env()
+
 def env(key: str, default=None):
     return os.environ.get(key, default)
 
@@ -950,6 +974,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     log.info(f"Customer Bot ready as {bot.user} ({bot.user.id})")
+    if _webhooks_loaded:
+        log.info("Loaded %d webhook URL(s) from /data/webhooks.env", _webhooks_loaded)
+    else:
+        log.warning("No /data/webhooks.env found - logs will not reach staff Discord until staff bot runs /setup")
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(VerifyView())
