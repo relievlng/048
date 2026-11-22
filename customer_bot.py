@@ -481,21 +481,36 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
     return _v2_container(body)
 
 
-# ─── TICKET CATEGORY AUTO-SETUP ──────────────────────────────────────────────
+# ─── TICKET CATEGORY LIFECYCLE ───────────────────────────────────────────────
+# Categories are created on demand when the first ticket of that type is opened,
+# and deleted automatically when the last ticket in them is closed.
 
-async def _ensure_ticket_categories(guild: discord.Guild) -> None:
+async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> discord.CategoryChannel | None:
     """
-    Ensure each ticket type has its own Discord category channel.
-    - Reuses an existing category with the matching name.
-    - Creates it (positioned below the main TICKET_CATEGORY_ID) if missing.
-    - Patches CONFIG in-place with the resolved IDs.
-    - Logs TICKET_CAT_* env var values so the user can persist them.
+    Return the Discord category for the given ticket type.
+    Creates it on the fly if it does not exist yet.
+    Caches the ID in CONFIG so subsequent lookups are free.
     """
+    cat        = TICKET_CATEGORIES[cat_id]
+    config_key = cat["config_key"]
+    cat_name   = cat["cat_name"]  # Discord-safe name (no slashes)
+
+    # Fast path: cached and still valid
+    cached_id = CONFIG.get(config_key)
+    if cached_id:
+        ch = guild.get_channel(cached_id)
+        if ch:
+            return ch
+
+    # Reuse an existing category with the same name
+    existing = discord.utils.get(guild.categories, name=cat_name)
+    if existing:
+        CONFIG[config_key] = existing.id
+        log.info("Reused existing category %s (%d)", cat_name, existing.id)
+        return existing
+
+    # Create the category now - only staff can see it; member overwrites added per-channel
     admin_role = guild.get_role(CONFIG["admin_role_id"])
-    base_cat   = guild.get_channel(CONFIG["ticket_category_id"])
-    position   = (base_cat.position + 1) if base_cat else 0
-
-    # Permission overwrites: staff see it, everyone else cannot
     overwrites: dict = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
     }
@@ -505,66 +520,56 @@ async def _ensure_ticket_categories(guild: discord.Guild) -> None:
             send_messages=True, read_message_history=True,
         )
 
-    created_any = False
-    for cat_id, cat in TICKET_CATEGORIES.items():
-        config_key   = cat["config_key"]
-        env_var      = config_key.upper().replace("ticket_", "TICKET_")  # -> TICKET_CAT_SUPPORT etc.
-        # cat_name is the sanitized Discord-safe name (no slashes); label is the display name
-        discord_name = cat["cat_name"]
+    # Position below the base ticket category if one is set
+    base_cat = guild.get_channel(CONFIG.get("ticket_category_id") or 0)
+    position = (base_cat.position + 1) if base_cat else 0
 
-        if CONFIG.get(config_key):
-            ch = guild.get_channel(CONFIG[config_key])
-            if ch:
-                log.info("Ticket category %-15s already set -> %s (%d)", cat["label"], ch.name, ch.id)
-                continue
-            # Stale ID in config - fall through and re-create
-            log.warning("Ticket category %s ID %d not found, re-creating", cat["label"], CONFIG[config_key])
-
-        # Look for an existing category by discord_name (sanitized)
-        existing = discord.utils.get(guild.categories, name=discord_name)
-        if existing:
-            CONFIG[config_key] = existing.id
-            log.info("Reused existing category %-15s -> %s (%d)  (set %s=%d)",
-                     discord_name, existing.name, existing.id, env_var, existing.id)
-            continue
-
-        # Create the Discord category
-        try:
-            new_cat = await guild.create_category(
-                name=discord_name,
-                overwrites=overwrites,
-                position=position,
-                reason="Ticket category auto-setup",
-            )
-            CONFIG[config_key] = new_cat.id
-            created_any = True
-            position += 1
-            log.info("Created Discord category %-15s (%d)  (set %s=%d)",
-                     discord_name, new_cat.id, env_var, new_cat.id)
-        except discord.Forbidden:
-            log.error("Missing Manage Channels permission - cannot create category %s", discord_name)
-            break
-        except discord.HTTPException as exc:
-            log.error("Failed to create category %s: %s", discord_name, exc)
-
-    if created_any:
-        log.info("=" * 60)
-        log.info("TICKET CATEGORIES CREATED - add these env vars to Railway:")
-        for cat_id, cat in TICKET_CATEGORIES.items():
-            val = CONFIG.get(cat["config_key"])
-            if val:
-                env_var = cat["config_key"].upper().replace("ticket_", "TICKET_")
-                log.info("  %s=%d", env_var, val)
-        log.info("=" * 60)
+    try:
+        new_cat = await guild.create_category(
+            name=cat_name,
+            overwrites=overwrites,
+            position=position,
+            reason=f"Ticket category for {cat['label']}",
+        )
+        CONFIG[config_key] = new_cat.id
+        log.info("Created ticket category %s (%d)", cat_name, new_cat.id)
+        return new_cat
+    except discord.Forbidden:
+        log.error("Missing Manage Channels permission - cannot create category %s", cat_name)
+        return None
+    except discord.HTTPException as exc:
+        log.error("Failed to create ticket category %s: %s", cat_name, exc)
+        return None
 
 
-def _resolve_ticket_discord_category(guild: discord.Guild, cat_id: str) -> discord.CategoryChannel | None:
-    """Return the Discord category channel for a given ticket type, falling back to the main one."""
+def _cat_id_for_channel(channel: discord.TextChannel) -> str | None:
+    """Find which TICKET_CATEGORIES key a ticket channel belongs to, via topic or name prefix."""
+    if channel.topic and " | " in channel.topic:
+        label = channel.topic.split(" | ")[0].strip()
+        for cid, cat in TICKET_CATEGORIES.items():
+            if cat["label"] == label:
+                return cid
+    # Fallback: match the channel name prefix
+    for cid, cat in TICKET_CATEGORIES.items():
+        if channel.name.startswith(cat["channel_prefix"] + "-"):
+            return cid
+    return None
+
+
+async def _cleanup_empty_category(guild: discord.Guild, cat_id: str) -> None:
+    """Delete the ticket category for cat_id if it has no channels left."""
     config_key = TICKET_CATEGORIES[cat_id]["config_key"]
-    ch = guild.get_channel(CONFIG.get(config_key) or 0)
-    if ch:
-        return ch
-    return guild.get_channel(CONFIG["ticket_category_id"])
+    cat_ch = guild.get_channel(CONFIG.get(config_key) or 0)
+    if not cat_ch:
+        return
+    remaining = [ch for ch in cat_ch.channels if isinstance(ch, discord.TextChannel)]
+    if not remaining:
+        try:
+            await cat_ch.delete(reason="All tickets closed - removing empty category")
+            CONFIG[config_key] = 0
+            log.info("Deleted empty ticket category %s", cat_ch.name)
+        except discord.HTTPException as exc:
+            log.warning("Could not delete empty category %s: %s", cat_ch.name, exc)
 
 
 # ─── EMOJI AUTO-SETUP ─────────────────────────────────────────────────────────
@@ -663,10 +668,10 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":    {"label": "Support",            "cat_name": "Support",          "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
-    "setup":      {"label": "Setup",              "cat_name": "Setup",            "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
-    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
-    "management": {"label": "Management",         "cat_name": "Management",       "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
+    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
+    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
+    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
+    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
 }
 
 class TicketPanelView(discord.ui.View):
@@ -704,39 +709,48 @@ class TicketControlView(discord.ui.View):
 
 
 async def open_ticket(interaction: discord.Interaction, cat_id: str):
-    guild = interaction.guild
+    guild  = interaction.guild
     member = interaction.user
     cat_info = TICKET_CATEGORIES[cat_id]
 
-    existing = discord.utils.get(
-        guild.text_channels,
-        name=f"ticket-{member.name.lower().replace(' ', '-')}"
+    # Check if the user already has any open ticket (search by user ID in topic)
+    user_id_tag = f"({member.id})"
+    existing = next(
+        (ch for ch in guild.text_channels if ch.topic and user_id_tag in ch.topic),
+        None,
     )
     if existing:
         await _reply_v2(
             interaction,
-            f"You already have an open ticket: {existing.mention}\n\n-# Close your existing ticket before opening a new one.",
+            f"You already have an open ticket: [{existing.name}]({existing.jump_url})\n\n"
+            "-# Close your existing ticket before opening a new one.",
             color=0xFEE75C,
         )
         return
 
+    # Build a clean channel name: {prefix}-{safe-username}
+    safe_name = re.sub(r"[^a-z0-9]", "-", member.name.lower())[:20].strip("-") or str(member.id)
+    channel_name = f"{cat_info['channel_prefix']}-{safe_name}"
+
     admin_role = guild.get_role(CONFIG["admin_role_id"])
-    ticket_category = _resolve_ticket_discord_category(guild, cat_id)
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         member: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True
+            view_channel=True, send_messages=True, read_message_history=True,
         ),
     }
     if admin_role:
         overwrites[admin_role] = discord.PermissionOverwrite(
             view_channel=True, send_messages=True,
-            read_message_history=True, manage_channels=True
+            read_message_history=True, manage_channels=True,
         )
 
+    # Get or create the per-type Discord category on demand
+    ticket_category = await _get_or_create_ticket_category(guild, cat_id)
+
     channel = await guild.create_text_channel(
-        name=f"ticket-{member.name.lower().replace(' ', '-')}",
+        name=channel_name,
         category=ticket_category,
         overwrites=overwrites,
         topic=f"{cat_info['label']} | {member} ({member.id})",
@@ -757,10 +771,9 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         view=TicketControlView(),
     )
 
-    # Use channel.jump_url so the link renders correctly even before cache propagates
     await _reply_v2(
         interaction,
-        f"{e('arrow')} **Ticket opened.**\nHead to your private channel: [#{channel.name}]({channel.jump_url})",
+        f"{e('arrow')} **Ticket opened.**\nHead to your private channel: [{channel.name}]({channel.jump_url})",
         color=0x57F287,
     )
 
@@ -862,8 +875,15 @@ async def close_ticket(interaction: discord.Interaction):
     # DM the ticket opener with the full transcript as a file
     await _dm_ticket_closed(channel, interaction.user, transcript)
 
+    # Stash cat_id before the channel is deleted (we need it for cleanup)
+    closing_cat_id = _cat_id_for_channel(channel)
+
     await asyncio.sleep(5)
     await channel.delete(reason=f"Ticket closed by {interaction.user}")
+
+    # Delete the category if it is now empty
+    if closing_cat_id:
+        await _cleanup_empty_category(interaction.guild, closing_cat_id)
 
 # ─── VERIFICATION VIEW ────────────────────────────────────────────────────────
 
@@ -1063,10 +1083,11 @@ async def on_ready():
 
     guild = bot.get_guild(CONFIG["guild_id"])
     if guild:
-        await _ensure_ticket_categories(guild)
+        # Ticket categories are created on demand when tickets are opened,
+        # and deleted when they become empty - no startup setup needed.
         await _setup_emojis(guild)
     else:
-        log.warning("Guild %s not found - skipping ticket category and emoji setup", CONFIG["guild_id"])
+        log.warning("Guild %s not found - skipping emoji setup", CONFIG["guild_id"])
 
     try:
         synced = await bot.tree.sync()
