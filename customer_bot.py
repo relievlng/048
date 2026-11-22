@@ -135,8 +135,10 @@ EMOJIS = {
     "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
     "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
     "bell":    env("EMOJI_BELL",    "<:bell:EMOJI_ID>"),
+    "bell-2":  env("EMOJI_BELL_2",  "<:bell-2:EMOJI_ID>"),
     "lock":    env("EMOJI_LOCK",    "<:lock:EMOJI_ID>"),
     "gear":    env("EMOJI_GEAR",    "<:gear:EMOJI_ID>"),
+    "gear-2":  env("EMOJI_GEAR_2",  "<:gear-2:EMOJI_ID>"),
 }
 
 def e(name: str) -> str:
@@ -619,8 +621,8 @@ def _rules_panel_payload() -> dict:
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
-    em_gear   = _emoji_in_text("gear")
-    em_bell   = _emoji_in_text("bell")
+    em_gear   = _emoji_in_text("gear-2")
+    em_bell   = _emoji_in_text("bell-2")
     em_ticket = _emoji_in_text("ticket")
     em_arrow  = _emoji_in_text("arrow")
     em_warn   = _emoji_in_text("warn")
