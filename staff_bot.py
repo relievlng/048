@@ -2302,6 +2302,75 @@ async def cmd_addnote_staff(i: discord.Interaction, query: str, note: str):
     await i.followup.send(embed=e, ephemeral=True)
 
 
+@app_commands.command(name="pin", description="[STAFF] Pin a message in any channel by message ID.")
+@app_commands.describe(
+    message_id="ID of the message to pin",
+    channel="Channel the message is in (defaults to current channel)",
+)
+@staff_only()
+async def cmd_pin(i: discord.Interaction, message_id: str, channel: Optional[discord.TextChannel] = None):
+    await i.response.defer(ephemeral=True)
+    target_channel = channel or i.channel
+    try:
+        mid = int(message_id.strip())
+    except ValueError:
+        await i.followup.send(embed=err_embed("Invalid ID", "Message ID must be a number."), ephemeral=True)
+        return
+    try:
+        msg = await target_channel.fetch_message(mid)
+    except discord.NotFound:
+        await i.followup.send(
+            embed=err_embed("Not Found", f"No message with ID `{mid}` found in {target_channel.mention}."),
+            ephemeral=True,
+        )
+        return
+    except discord.Forbidden:
+        await i.followup.send(
+            embed=err_embed("Missing Access", f"I can't read messages in {target_channel.mention}."),
+            ephemeral=True,
+        )
+        return
+    if msg.pinned:
+        await i.followup.send(
+            embed=warn_embed("Already Pinned", f"That message is already pinned in {target_channel.mention}."),
+            ephemeral=True,
+        )
+        return
+    try:
+        await msg.pin(reason=f"Pinned by staff: {i.user} ({i.user.id})")
+    except discord.Forbidden:
+        await i.followup.send(
+            embed=err_embed("Missing Permissions", "I need **Manage Messages** permission to pin."),
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as ex:
+        await i.followup.send(
+            embed=err_embed("Pin Failed", f"Discord returned an error: {ex.text}"),
+            ephemeral=True,
+        )
+        return
+    # Build preview of pinned message
+    preview = (msg.content[:120] + "...") if len(msg.content) > 120 else msg.content or "[no text content]"
+    e = ok_embed("Message Pinned", f"Pinned in {target_channel.mention}.")
+    e.add_field(name="Author", value=msg.author.mention, inline=True)
+    e.add_field(name="Message", value=f"[Jump]({msg.jump_url})", inline=True)
+    e.add_field(name="Preview", value=f"> {preview}", inline=False)
+    e.set_footer(text=f"Pinned by {i.user} - {ts()}")
+    await i.followup.send(embed=e, ephemeral=True)
+    # Log to webhook
+    log_e = discord.Embed(
+        title="Message Pinned",
+        description=f"{i.user.mention} pinned a message in {target_channel.mention}.",
+        color=BRAND_COLOR,
+    )
+    log_e.add_field(name="Message Link", value=f"[Jump to Message]({msg.jump_url})", inline=True)
+    log_e.add_field(name="Original Author", value=msg.author.mention, inline=True)
+    log_e.add_field(name="Preview", value=f"> {preview}", inline=False)
+    log_e.set_footer(text=f"Actor: {i.user} ({i.user.id}) - {ts()}")
+    await webhook_log(log_e)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 ALL_COMMANDS = [
@@ -2318,6 +2387,7 @@ ALL_COMMANDS = [
     cmd_auditlog, cmd_stats, cmd_announce,
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
     cmd_test, cmd_seed,
+    cmd_pin,
 ]
 
 async def main():
