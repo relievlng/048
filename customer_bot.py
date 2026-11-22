@@ -135,10 +135,8 @@ EMOJIS = {
     "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
     "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
     "bell":    env("EMOJI_BELL",    "<:bell:EMOJI_ID>"),
-    "bell-2":  env("EMOJI_BELL_2",  "<:bell-2:EMOJI_ID>"),
     "lock":    env("EMOJI_LOCK",    "<:lock:EMOJI_ID>"),
     "gear":    env("EMOJI_GEAR",    "<:gear:EMOJI_ID>"),
-    "gear-2":  env("EMOJI_GEAR_2",  "<:gear-2:EMOJI_ID>"),
 }
 
 def e(name: str) -> str:
@@ -621,15 +619,14 @@ def _rules_panel_payload() -> dict:
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
-    em_gear   = _emoji_in_text("gear-2")
-    em_bell   = _emoji_in_text("bell-2")
+    em_warn   = _emoji_in_text("warn")
+    em_lock   = _emoji_in_text("lock")
     em_ticket = _emoji_in_text("ticket")
     em_arrow  = _emoji_in_text("arrow")
-    em_warn   = _emoji_in_text("warn")
     em_dot    = _emoji_in_text("dot")
 
-    gear_pfx   = f"{em_gear} "   if em_gear   else "⚙️ "
-    bell_pfx   = f"{em_bell} "   if em_bell   else "\U0001f514 "
+    gear_pfx   = f"{em_warn} "   if em_warn   else "⚠️ "
+    bell_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
     ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f3ab "
     arrow_pfx  = f"{em_arrow} "  if em_arrow  else "➡️ "
     warn_pfx   = f"{em_warn} "   if em_warn   else "⚠️ "
