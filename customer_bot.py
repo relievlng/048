@@ -324,19 +324,28 @@ def _v2_container(body: list, accent: int = 0x2b2d31) -> dict:
     }
 
 
+def _emoji_in_text(key: str) -> str:
+    """Return emoji string only if it's been configured (not a placeholder)."""
+    val = EMOJIS.get(key, "")
+    return val if val and "EMOJI_ID" not in val else ""
+
+
 def _ticket_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Open a Ticket\n"
-        "Choose a category below. A private channel opens and staff meet you there."
+        "**Open a Ticket**\n"
+        "-# Choose a category. A private channel opens and staff meet you there."
     )})
     body.append({"type": 14})
     for cat_id, cat in TICKET_CATEGORIES.items():
+        em = _emoji_in_text(cat["emoji_key"])
+        prefix = f"{em} " if em else ""
         body.append(_v2_section(
-            f"**{cat['label']}**\n{cat['desc']}",
+            f"{prefix}**{cat['label']}**\n-# {cat['desc']}",
             cat["label"],
             f"ticket_open_{cat_id}",
+            btn_emoji_name=cat["emoji_key"],
         ))
     return _v2_container(body)
 
@@ -345,16 +354,16 @@ def _verify_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Verification\n"
-        "To access this server you need to verify your license key.\n\n"
-        "Your key is linked to your Discord account permanently.\n\n"
-        "-# One key per Discord account."
+        "**Verification**\n"
+        "-# To access this server you need to verify your license key."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        "Click **Verify** and enter your license key when prompted.",
+        f"{_emoji_in_text('key') + ' ' if _emoji_in_text('key') else ''}**Link your license key**\n"
+        "-# Your key is linked to your Discord account permanently. One key per account.",
         "Verify",
         "verify_button",
+        btn_emoji_name="verify",
         btn_style=3,
     ))
     return _v2_container(body)
@@ -364,22 +373,24 @@ def _hwid_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## HWID Reset\n"
-        "Changed hardware or reinstalled Windows? Reset your HWID here.\n\n"
-        "You have a limited number of resets - use only when necessary.\n"
-        "Used all resets? Open a ticket in the Key / HWID category.\n\n"
-        "-# HWID resets are logged and monitored."
+        "**HWID Reset**\n"
+        "-# Changed hardware or reinstalled Windows? Reset your HWID here."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        "Click **Reset HWID** to clear your hardware ID.",
+        f"{_emoji_in_text('chip') + ' ' if _emoji_in_text('chip') else ''}**Reset your hardware ID**\n"
+        "-# Limited resets available. Used all resets? Open a Key / HWID ticket.\n"
+        "-# HWID resets are logged and monitored.",
         "Reset HWID",
         "hwid_reset_button",
+        btn_emoji_name="chip",
     ))
     return _v2_container(body)
 
 
 def _rules_panel_payload() -> dict:
+    em = _emoji_in_text("dot")
+    prefix = f"{em} " if em else "- "
     rules = [
         ("Respect everyone",    "Harassment, discrimination, and toxicity are not tolerated."),
         ("No sharing keys",     "License keys are non-transferable. Sharing a key results in a permanent ban."),
@@ -390,13 +401,12 @@ def _rules_panel_payload() -> dict:
         ("No advertising",      "Advertising other products or services without permission is not allowed."),
         ("Follow Discord ToS",  "All Discord Terms of Service rules apply at all times."),
     ]
-    rule_lines = "\n".join(f"**{n}** - {v}" for n, v in rules)
+    rule_lines = "\n".join(f"{prefix}**{n}** - {v}" for n, v in rules)
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Server Rules\n"
-        "By being in this server you agree to the following rules. "
-        "Violations may result in removal or key termination.\n\n"
+        "**Server Rules**\n"
+        "-# By being in this server you agree to the following rules. Violations may result in removal or key termination.\n\n"
         f"{rule_lines}\n\n"
         "-# Last updated by staff"
     )})
@@ -404,17 +414,19 @@ def _rules_panel_payload() -> dict:
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
+    em_arrow = _emoji_in_text("arrow")
+    em_warn = _emoji_in_text("warn")
+    bullet = f"{em_arrow} " if em_arrow else "- "
+    warn = f"{em_warn} " if em_warn else "! "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "## Awaiting Setup?\n"
-        "Complete every step below, then wait for the Setup Team.\n\n"
-        f"**Get Setup Pings** - Click the button below to receive setup pings (click again to remove).\n\n"
-        f"**Open a Setup Ticket** - Open a setup ticket in {ticket_ref}. "
-        "Your Invoice ID is in your DMs with this bot.\n\n"
-        f"**Wait for the Setup Team** - Check {alerts_ref} regularly. "
-        "When a team member is available, ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
-        "Do **NOT** ping staff unless they have announced they are available for setups.\n\n"
+        "**Awaiting Setup?**\n"
+        "-# Complete every step below, then wait for the Setup Team.\n\n"
+        f"{bullet}**Get Setup Pings** - Click the button below (click again to remove).\n\n"
+        f"{bullet}**Open a Ticket** - Open a setup ticket in {ticket_ref}. Your Invoice ID is in your DMs.\n\n"
+        f"{bullet}**Wait for the Team** - Check {alerts_ref} regularly. Ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
+        f"{warn}Do **NOT** ping staff unless they have announced availability.\n\n"
         "-# Failing to follow these steps may delay your setup."
     )})
     body.append({"type": 14})
@@ -422,17 +434,111 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
         "Toggle setup pings - get pinged when the setup team is available.",
         "Setup Pings",
         "setup_pings_toggle",
+        btn_emoji_name="arrow",
     ))
     return _v2_container(body)
+
+
+# ─── EMOJI AUTO-SETUP ─────────────────────────────────────────────────────────
+
+EMOJI_SVG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emojis")
+
+# Maps emoji key -> SVG filename stem (all match by convention except warn)
+_EMOJI_FILE_MAP = {
+    "verify":  "verify",
+    "key":     "key",
+    "chip":    "chip",
+    "ticket":  "ticket",
+    "rules":   "rules",
+    "cross":   "cross",
+    "shield":  "shield",
+    "arrow":   "arrow",
+    "warn":    "warning",
+    "dot":     "dot",
+}
+
+async def _setup_emojis(guild: discord.Guild) -> None:
+    """
+    Auto-create custom emojis from /emojis/*.svg on startup.
+    - Reuses existing guild emojis by name (skips re-upload).
+    - Converts SVG -> PNG via cairosvg, uploads via guild.create_custom_emoji().
+    - Patches EMOJIS dict in-place with real <:name:id> strings.
+    - Logs the EMOJI_* env var values so the user can persist them.
+    """
+    try:
+        import cairosvg  # type: ignore
+    except ImportError:
+        log.warning("cairosvg not installed - skipping emoji auto-setup. Add cairosvg>=2.7.0 to requirements.txt")
+        return
+
+    if not os.path.isdir(EMOJI_SVG_DIR):
+        log.warning("No /emojis/ directory found - skipping emoji auto-setup")
+        return
+
+    # Build a map of name -> existing emoji for fast lookup
+    existing: dict[str, discord.Emoji] = {em.name: em for em in guild.emojis}
+    created_any = False
+
+    for key, file_stem in _EMOJI_FILE_MAP.items():
+        emoji_name = file_stem  # Discord emoji name = file stem
+        env_var    = f"EMOJI_{key.upper()}"
+
+        # If env var is already set to a real emoji string, skip
+        current = EMOJIS.get(key, "")
+        if current and "EMOJI_ID" not in current:
+            log.info("Emoji %s already configured via env (%s)", key, env_var)
+            continue
+
+        # Reuse existing guild emoji if present
+        if emoji_name in existing:
+            em = existing[emoji_name]
+            fmt = f"<:{em.name}:{em.id}>"
+            EMOJIS[key] = fmt
+            log.info("Reused existing emoji %-10s -> %s  (set %s=%s)", emoji_name, fmt, env_var, fmt)
+            continue
+
+        # Try to upload from SVG
+        svg_path = os.path.join(EMOJI_SVG_DIR, f"{file_stem}.svg")
+        if not os.path.isfile(svg_path):
+            log.warning("SVG not found for emoji key=%s (%s) - skipping", key, svg_path)
+            continue
+
+        try:
+            png_bytes: bytes = cairosvg.svg2png(
+                url=svg_path,
+                output_width=128,
+                output_height=128,
+            )
+            em = await guild.create_custom_emoji(name=emoji_name, image=png_bytes)
+            fmt = f"<:{em.name}:{em.id}>"
+            EMOJIS[key] = fmt
+            created_any = True
+            log.info("Created emoji %-10s -> %s  (set %s=%s)", emoji_name, fmt, env_var, fmt)
+        except discord.Forbidden:
+            log.error("Missing Manage Emojis permission - cannot upload emoji %s", emoji_name)
+            break
+        except discord.HTTPException as exc:
+            log.error("Failed to upload emoji %s: %s", emoji_name, exc)
+        except Exception as exc:
+            log.error("Unexpected error uploading emoji %s: %s", emoji_name, exc)
+
+    if created_any:
+        log.info("=" * 60)
+        log.info("EMOJI SETUP COMPLETE - add these env vars to Railway to persist:")
+        for key in _EMOJI_FILE_MAP:
+            val = EMOJIS.get(key, "")
+            if val and "EMOJI_ID" not in val:
+                log.info("  EMOJI_%s=%s", key.upper(), val)
+        log.info("=" * 60)
 
 
 # ─── TICKET VIEWS ─────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":  {"label": "Support",           "emoji": e("ticket"),   "desc": "Product support or general enquiries"},
-    "setup":    {"label": "Setup",             "emoji": e("arrow"),    "desc": "First time setup and installation"},
-    "billing":  {"label": "Billing",           "emoji": e("shield"),   "desc": "Purchases, renewals and refunds"},
-    "key":      {"label": "Key / HWID Issues", "emoji": e("key"),      "desc": "Key problems and HWID resets"},
+    "support":  {"label": "Support",           "emoji_key": "ticket",  "desc": "Product support or general enquiries"},
+    "setup":    {"label": "Setup",             "emoji_key": "arrow",   "desc": "First time setup and installation"},
+    "billing":  {"label": "Billing",           "emoji_key": "shield",  "desc": "Purchases, renewals and refunds"},
+    "key":      {"label": "Key / HWID Issues", "emoji_key": "key",     "desc": "Key problems and HWID resets"},
 }
 
 class TicketPanelView(discord.ui.View):
@@ -441,7 +547,7 @@ class TicketPanelView(discord.ui.View):
         for cat_id, cat in TICKET_CATEGORIES.items():
             btn = discord.ui.Button(
                 label=cat["label"],
-                emoji=None,
+                emoji=None,  # buttons handled by persistent view, emoji shown in Components v2 panel
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"ticket_open_{cat_id}",
             )
@@ -751,6 +857,14 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(HWIDView())
     bot.add_view(SetupPingsView())
+
+    # Auto-create custom emojis from /emojis/ SVG files
+    guild = bot.get_guild(CONFIG["guild_id"])
+    if guild:
+        await _setup_emojis(guild)
+    else:
+        log.warning("Guild %s not found - skipping emoji setup", CONFIG["guild_id"])
+
     try:
         synced = await bot.tree.sync()
         log.info(f"Synced {len(synced)} slash commands")
