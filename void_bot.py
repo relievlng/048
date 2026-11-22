@@ -38,6 +38,7 @@ CONFIG = {
     "ticket_category_id":  env_int("VOID_TICKET_CATEGORY_ID"),
     "verified_role_id":    env_int("VOID_VERIFIED_ROLE_ID"),
     "logo_url":            env("VOID_LOGO_URL",                 ""),
+    "brand_name":          env("VOID_BRAND_NAME",               "Void"),
     "customer_cl_webhook": env("VOID_CUSTOMER_CHANGELOG_WEBHOOK", ""),
     "db_path":             env("DB_PATH",                       "/data/keylock.db"),
     "api_port":            env_int("VOID_PORT", env_int("PORT", 8081)),
@@ -266,21 +267,23 @@ TICKET_CATEGORIES = {
 
 PRODUCTS = {
     "public": {
-        "label": "Public Bypass",
-        "desc": (
+        "label":       "Public Bypass",
+        "tag":         "STANDARD TIER",
+        "desc":        (
             "Our public build delivers strong, reliable performance for everyday use. "
-            "Users who stay active and consistent may later qualify for access to our private build."
+            "Active and consistent users may later qualify for access to our private build."
         ),
         "invite_only": False,
+        "image_url":   env("VOID_PUBLIC_IMAGE_URL", ""),
         "features": [
-            "Compatible with Windows 10/11",
-            "Fully streamproof (NVIDIA, AMD, Discord, OBS, AnyDesk)",
-            "Taskbar and Alt Tab Proof",
+            "Windows 10 / 11 compatible",
+            "Fully streamproof - NVIDIA, AMD, Discord, OBS, AnyDesk",
+            "Taskbar and Alt Tab proof",
             "Bypasses all scanners and checking tools",
             "User friendly GUI",
-            "Exclusive and unique features (force crack, force freeze, and more)",
+            "Force crack, force freeze, and more exclusive features",
             "Anti AnyDesk / RustDesk / TeamViewer",
-            "Quick destruction in under a second",
+            "Destruction in under a second",
         ],
         "pricing": [
             ("1 Month",  "$45"),
@@ -291,24 +294,25 @@ PRODUCTS = {
         "emoji_key": "shield",
     },
     "private": {
-        "label": "Private Bypass",
-        "desc": (
-            "Our private build is strictly **INVITE ONLY**, with access granted exclusively "
-            "through existing private members or staff. Reserved for trusted users - "
-            "a more advanced, refined experience."
+        "label":       "Private Bypass",
+        "tag":         "INVITE ONLY",
+        "desc":        (
+            "Our private build is reserved for trusted, vetted users. "
+            "Access is granted exclusively through existing private members or staff - "
+            "a more advanced, refined experience with a strictly limited user base."
         ),
         "invite_only": True,
+        "image_url":   env("VOID_PRIVATE_IMAGE_URL", ""),
         "features": [
-            "Compatible with Windows 10/11",
-            "Fully streamproof (NVIDIA, AMD, Discord, OBS, AnyDesk)",
-            "Taskbar and Alt Tab Proof",
+            "Windows 10 / 11 compatible",
+            "Fully streamproof - NVIDIA, AMD, Discord, OBS, AnyDesk",
+            "Taskbar and Alt Tab proof",
             "Bypasses all scanners and checking tools",
             "User friendly GUI",
-            "Additional advanced features",
-            "INVITE ONLY - Limited user base",
-            "Exclusive and unique features (force crack, force freeze, and more)",
+            "Advanced exclusive features not in public build",
+            "Force crack, force freeze, and more",
             "Anti AnyDesk / RustDesk / TeamViewer",
-            "Quick destruction in under a second",
+            "Destruction in under a second",
         ],
         "pricing": [
             ("1 Month",  "$70"),
@@ -354,35 +358,65 @@ def _ticket_panel_payload() -> dict:
 
 
 def _product_panel_payload(product_id: str) -> dict:
-    p = PRODUCTS[product_id]
-    em_icon = _emoji_in_text(p["emoji_key"])
+    p       = PRODUCTS[product_id]
+    brand   = CONFIG.get("brand_name", "Void")
     em_dot  = _emoji_in_text("dot")
     em_warn = _emoji_in_text("warn")
-    pfx    = f"{em_icon} " if em_icon else ""
-    bullet = f"{em_dot} "  if em_dot  else "- "
-    warn   = f"{em_warn} " if em_warn else "⚠️ "
+    em_lock = _emoji_in_text("lock")
+    em_key  = _emoji_in_text("key")
+    bullet  = f"{em_dot} "  if em_dot  else "- "
+    warn    = f"{em_warn} " if em_warn else "⚠️ "
+    lock    = f"{em_lock} " if em_lock else "\U0001f512 "
 
-    features_txt = "\n".join(f"{bullet}{f}" for f in p["features"])
-    pricing_txt  = "\n".join(f"{bullet}**{label}:** {price}" for label, price in p["pricing"])
+    # Header block: product name + tag line
+    header_content = (
+        f"## {p['label']}\n"
+        f"-# {brand.upper()} - {p['tag']}\n\n"
+        f"{p['desc']}"
+    )
 
     body: list = []
     body.extend(_v2_banner())
-    body.append({"type": 10, "content": f"## {pfx}{p['label']}\n{p['desc']}"})
 
+    # Header - with thumbnail if image URL is set
+    img = p.get("image_url", "")
+    if img:
+        body.append({
+            "type": 9,
+            "components": [{"type": 10, "content": header_content}],
+            "accessory": {
+                "type": 11,
+                "media": {"url": img},
+                "description": p["label"],
+            },
+        })
+    else:
+        body.append({"type": 10, "content": header_content})
+
+    # Invite only badge
     if p["invite_only"]:
         body.append({"type": 14})
         body.append({"type": 10, "content": (
-            f"{warn}**INVITE ONLY** - Access is granted exclusively through existing "
-            "private members or staff."
+            f"{lock}**INVITE ONLY** - Access granted through existing private members or staff only. "
+            "Not available to the public."
         )})
 
+    # Features
     body.append({"type": 14})
-    body.append({"type": 10, "content": f"**Features:**\n{features_txt}"})
+    features_txt = "\n".join(f"{bullet}{f}" for f in p["features"])
+    body.append({"type": 10, "content": f"**Features**\n{features_txt}"})
+
+    # Pricing
     body.append({"type": 14})
-    body.append({"type": 10, "content": f"**Pricing:**\n{pricing_txt}"})
+    pricing_lines = []
+    for i, (label, price) in enumerate(p["pricing"]):
+        pricing_lines.append(f"{bullet}**{label}** - {price}")
+    body.append({"type": 10, "content": "**Pricing**\n" + "\n".join(pricing_lines)})
+
+    # CTA
     body.append({"type": 14})
     body.append(_v2_section(
-        "-# Ready to purchase? Open a purchase ticket.",
+        f"-# {brand} - Secure your access today.",
         "BUY NOW",
         "void_ticket_open_purchase",
         btn_emoji_name="key",
