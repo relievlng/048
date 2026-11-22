@@ -288,11 +288,12 @@ async def _post_channel_v2(channel: discord.TextChannel, payload: dict) -> None:
                 raise RuntimeError(f"Discord API {resp.status}")
 
 
+_PLACEHOLDER_BANNER = "https://media1.tenor.com/m/0mL6VQxtdE0AAAAC/cat-kitty.gif"
+
+
 def _v2_banner() -> list:
-    """Return a MediaGallery component for the logo banner, or [] if no LOGO_URL."""
-    url = CONFIG.get("logo_url")
-    if not url:
-        return []
+    """Return a MediaGallery banner. Uses LOGO_URL if set, otherwise placeholder GIF."""
+    url = CONFIG.get("logo_url") or _PLACEHOLDER_BANNER
     return [{"type": 12, "items": [{"media": {"url": url}}]}]
 
 
@@ -334,8 +335,8 @@ def _ticket_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "**Open a Ticket**\n"
-        "-# Choose a category. A private channel opens and staff meet you there."
+        "## Tickets\n"
+        "Choose a category. A private channel opens and staff meet you there."
     )})
     body.append({"type": 14})
     for cat_id, cat in TICKET_CATEGORIES.items():
@@ -351,15 +352,17 @@ def _ticket_panel_payload() -> dict:
 
 
 def _verify_panel_payload() -> dict:
+    em = _emoji_in_text("verify")
+    prefix = f"{em} " if em else ""
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "**Verification**\n"
-        "-# To access this server you need to verify your license key."
+        "## Verification\n"
+        "To access this server you need to verify your license key."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{_emoji_in_text('key') + ' ' if _emoji_in_text('key') else ''}**Link your license key**\n"
+        f"{prefix}**Link your license key**\n"
         "-# Your key is linked to your Discord account permanently. One key per account.",
         "Verify",
         "verify_button",
@@ -370,16 +373,18 @@ def _verify_panel_payload() -> dict:
 
 
 def _hwid_panel_payload() -> dict:
+    em = _emoji_in_text("chip")
+    prefix = f"{em} " if em else ""
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "**HWID Reset**\n"
-        "-# Changed hardware or reinstalled Windows? Reset your HWID here."
+        "## HWID Reset\n"
+        "Changed hardware or reinstalled Windows? Reset your HWID here."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{_emoji_in_text('chip') + ' ' if _emoji_in_text('chip') else ''}**Reset your hardware ID**\n"
-        "-# Limited resets available. Used all resets? Open a Key / HWID ticket.\n"
+        f"{prefix}**Reset your hardware ID**\n"
+        "-# Limited resets available. Used all resets? Open a ticket instead.\n"
         "-# HWID resets are logged and monitored.",
         "Reset HWID",
         "hwid_reset_button",
@@ -405,8 +410,9 @@ def _rules_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "**Server Rules**\n"
-        "-# By being in this server you agree to the following rules. Violations may result in removal or key termination.\n\n"
+        "## Server Rules\n"
+        "By being in this server you agree to the following rules. "
+        "Violations may result in removal or key termination.\n\n"
         f"{rule_lines}\n\n"
         "-# Last updated by staff"
     )})
@@ -415,23 +421,25 @@ def _rules_panel_payload() -> dict:
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
     em_arrow = _emoji_in_text("arrow")
-    em_warn = _emoji_in_text("warn")
+    em_warn  = _emoji_in_text("warn")
     bullet = f"{em_arrow} " if em_arrow else "- "
-    warn = f"{em_warn} " if em_warn else "! "
+    warn   = f"{em_warn} " if em_warn  else "! "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        "**Awaiting Setup?**\n"
-        "-# Complete every step below, then wait for the Setup Team.\n\n"
-        f"{bullet}**Get Setup Pings** - Click the button below (click again to remove).\n\n"
-        f"{bullet}**Open a Ticket** - Open a setup ticket in {ticket_ref}. Your Invoice ID is in your DMs.\n\n"
-        f"{bullet}**Wait for the Team** - Check {alerts_ref} regularly. Ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
+        "## Awaiting Setup?\n"
+        "Complete every step below, then wait for the Setup Team.\n\n"
+        f"{bullet}**Get Setup Pings** - Click the button below. Click again to remove.\n\n"
+        f"{bullet}**Open a Ticket** - Open a setup ticket in {ticket_ref}. "
+        "Your Invoice ID is in your DMs.\n\n"
+        f"{bullet}**Wait for the Team** - Check {alerts_ref} regularly. "
+        "Ping them in your ticket **once** with your AnyDesk code and invoice ID.\n\n"
         f"{warn}Do **NOT** ping staff unless they have announced availability.\n\n"
         "-# Failing to follow these steps may delay your setup."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        "Toggle setup pings - get pinged when the setup team is available.",
+        f"{em_arrow + ' ' if em_arrow else ''}Toggle setup pings - get notified when the team is available.",
         "Setup Pings",
         "setup_pings_toggle",
         btn_emoji_name="arrow",
