@@ -107,6 +107,17 @@ def init_db(path: str) -> sqlite3.Connection:
             content     TEXT NOT NULL,
             timestamp   TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS payments (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id   TEXT UNIQUE NOT NULL,
+            discord_id   TEXT NOT NULL,
+            key          TEXT NOT NULL,
+            product      TEXT NOT NULL,
+            expires_at   TEXT,
+            paid_at      TEXT NOT NULL,
+            confirmed_by TEXT NOT NULL,
+            notes        TEXT
+        );
     """)
     conn.commit()
     return conn
@@ -1135,6 +1146,24 @@ async def cmd_lookup(i: discord.Interaction, query: str):
     if hwid_alts:
         h_str = " ".join(f"<@{a}>" for a in hwid_alts[:8])
         e.add_field(name=f"HWID-Shared Accounts ({len(hwid_alts)})", value=h_str, inline=False)
+    # Payment history from payments table (populated by void_bot on purchase confirmation)
+    payment_rows = []
+    try:
+        payment_rows = DB.execute(
+            "SELECT invoice_id, product, expires_at, paid_at, confirmed_by, notes "
+            "FROM payments WHERE discord_id=? ORDER BY id DESC LIMIT 5",
+            (did,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pass
+    if payment_rows:
+        p_lines = []
+        for p in payment_rows:
+            paid_date = p["paid_at"][:10] if p["paid_at"] else "?"
+            exp_str   = p["expires_at"][:10] if p["expires_at"] else "lifetime"
+            p_lines.append(f"`{p['invoice_id']}` - {p['product']} - expires {exp_str} - paid {paid_date}")
+        e.add_field(name=f"Payment History ({len(payment_rows)})", value="\n".join(p_lines), inline=False)
+
     e.add_field(name="License Key", value=f"`{row['key']}`", inline=False)
     if recent:
         lines = []

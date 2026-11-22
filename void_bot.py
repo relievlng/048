@@ -113,6 +113,17 @@ def init_db(path: str) -> sqlite3.Connection:
             channel_id  TEXT NOT NULL,
             message_id  TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS payments (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id   TEXT UNIQUE NOT NULL,
+            discord_id   TEXT NOT NULL,
+            key          TEXT NOT NULL,
+            product      TEXT NOT NULL,
+            expires_at   TEXT,
+            paid_at      TEXT NOT NULL,
+            confirmed_by TEXT NOT NULL,
+            notes        TEXT
+        );
     """)
     conn.commit()
     # Migrations
@@ -905,6 +916,15 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
             "UPDATE void_tickets SET invoice_id=?, paid_at=? WHERE channel_id=?",
             (invoice_id, now_iso(), str(channel.id)),
         )
+
+        # Write clean payment record (queryable from staff server)
+        DB.execute(
+            """INSERT OR IGNORE INTO payments
+               (invoice_id, discord_id, key, product, expires_at, paid_at, confirmed_by, notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (invoice_id, str(user_id), key, prod, exp_iso, now_iso(),
+             str(interaction.user.id), notes_txt or None),
+        )
         DB.commit()
 
         # DM the user
@@ -932,31 +952,10 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
             log.warning("Payment DM failed for %s: %s", user_id, e)
             dm_sent = False
 
-        # Post confirmation panel in ticket channel
-        em_dot  = _emoji_in_text("dot")
-        em_key  = _emoji_in_text("key")
-        bullet  = f"{em_dot} " if em_dot else "- "
-        key_pfx = f"{em_key} " if em_key else ""
-
-        status_lines = [
-            f"{bullet}Invoice ID: `{invoice_id}`",
-            f"{bullet}Product: `{prod}`",
-            f"{bullet}Valid For: {exp_label}",
-            f"{bullet}Key: ||`{key}`||",
-            f"{bullet}DM: {'Sent' if dm_sent else 'Failed - user has DMs disabled'}",
-        ]
-        if notes_txt:
-            status_lines.append(f"{bullet}Notes: {notes_txt}")
-
-        body = [
-            {"type": 10, "content": f"## {key_pfx}Payment Confirmed\n-# By {interaction.user.mention}"},
-            {"type": 14},
-            {"type": 10, "content": "\n".join(status_lines)},
-        ]
-        await _post_channel_v2(channel, _v2_container(body, accent=0x57F287))
-
+        dm_status = "Sent" if dm_sent else "Failed - user has DMs disabled"
         await interaction.followup.send(
-            f"Payment confirmed. Invoice `{invoice_id}` issued.", ephemeral=True
+            f"Payment confirmed. Invoice `{invoice_id}` | Key `{key[:8]}...` | DM: {dm_status}",
+            ephemeral=True,
         )
         log.info(
             "Payment confirmed user=%s invoice=%s key=%s... by %s",
