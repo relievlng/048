@@ -382,12 +382,11 @@ async def _post_channel_v2(channel: discord.TextChannel, payload: dict) -> None:
                 raise RuntimeError(f"Discord API {resp.status}")
 
 
-_PLACEHOLDER_BANNER = "https://media1.tenor.com/m/0mL6VQxtdE0AAAAC/cat-kitty.gif"
-
-
 def _v2_banner() -> list:
-    """Return a MediaGallery banner. Uses LOGO_URL if set, otherwise placeholder GIF."""
-    url = CONFIG.get("logo_url") or _PLACEHOLDER_BANNER
+    """Return a MediaGallery banner if LOGO_URL is configured, otherwise empty."""
+    url = CONFIG.get("logo_url")
+    if not url:
+        return []
     return [{"type": 12, "items": [{"media": {"url": url}}]}]
 
 
