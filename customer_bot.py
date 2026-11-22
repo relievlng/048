@@ -426,7 +426,9 @@ def _emoji_in_text(key: str) -> str:
 
 def _ticket_panel_payload() -> dict:
     em_ticket = _emoji_in_text("ticket")
+    em_dot    = _emoji_in_text("dot")
     ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f3ab "
+    bullet     = f"{em_dot} "    if em_dot    else "• "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
@@ -442,7 +444,7 @@ def _ticket_panel_payload() -> dict:
         em = _emoji_in_text(cat["emoji_key"])
         prefix = f"{em} " if em else ""
         body.append(_v2_section(
-            f"{prefix}**{cat['label'].upper()}**\n• {cat['desc']}",
+            f"{prefix}**{cat['label'].upper()}**\n{bullet}{cat['desc']}",
             cat["label"],
             f"ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
@@ -454,9 +456,11 @@ def _verify_panel_payload() -> dict:
     em_lock   = _emoji_in_text("lock")
     em_key    = _emoji_in_text("key")
     em_verify = _emoji_in_text("verify")
+    em_dot    = _emoji_in_text("dot")
     lock_pfx   = f"{em_lock} "   if em_lock   else "\U0001f512 "
     key_pfx    = f"{em_key} "    if em_key    else "\U0001f511 "
     verify_pfx = f"{em_verify} " if em_verify else ""
+    bullet     = f"{em_dot} "    if em_dot    else "• "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
@@ -466,14 +470,14 @@ def _verify_panel_payload() -> dict:
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{key_pfx}**HOW IT WORKS**\n"
-        "• Your license key is linked permanently to your Discord account.\n"
-        "• One key per account - keys are non-transferable.\n"
-        "• Click the button below to begin verification."
+        f"{bullet}Your license key is linked permanently to your Discord account.\n"
+        f"{bullet}One key per account - keys are non-transferable.\n"
+        f"{bullet}Click the button below to begin verification."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
         f"{verify_pfx}**VERIFY YOUR LICENSE**\n"
-        "• Have your license key ready before clicking.",
+        f"{bullet}Have your license key ready before clicking.",
         "Verify",
         "verify_button",
         btn_emoji_name="verify",
@@ -486,9 +490,11 @@ def _hwid_panel_payload() -> dict:
     em_gear = _emoji_in_text("gear")
     em_chip = _emoji_in_text("chip")
     em_warn = _emoji_in_text("warn")
+    em_dot  = _emoji_in_text("dot")
     gear_pfx = f"{em_gear} " if em_gear else "⚙️ "
     chip_pfx = f"{em_chip} " if em_chip else ""
     warn_pfx = f"{em_warn} " if em_warn else "⚠️ "
+    bullet   = f"{em_dot} "  if em_dot  else "• "
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
@@ -498,14 +504,14 @@ def _hwid_panel_payload() -> dict:
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{warn_pfx}**BEFORE YOU RESET**\n"
-        "• You have a limited number of resets - use them wisely.\n"
-        "• HWID resets are logged and monitored by staff.\n"
-        "• Used all your resets? Open a support ticket instead."
+        f"{bullet}You have a limited number of resets - use them wisely.\n"
+        f"{bullet}HWID resets are logged and monitored by staff.\n"
+        f"{bullet}Used all your resets? Open a support ticket instead."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
         f"{chip_pfx}**RESET YOUR HARDWARE ID**\n"
-        "• Click the button to consume one of your available resets.",
+        f"{bullet}Click the button to consume one of your available resets.",
         "Reset HWID",
         "hwid_reset_button",
         btn_emoji_name="chip",
@@ -561,18 +567,32 @@ def _rules_panel_payload() -> dict:
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
+    em_gear   = _emoji_in_text("gear")
+    em_bell   = _emoji_in_text("bell")
+    em_ticket = _emoji_in_text("ticket")
+    em_arrow  = _emoji_in_text("arrow")
+    em_warn   = _emoji_in_text("warn")
+    em_dot    = _emoji_in_text("dot")
+
+    gear_pfx   = f"{em_gear} "   if em_gear   else "⚙️ "
+    bell_pfx   = f"{em_bell} "   if em_bell   else "\U0001f514 "
+    ticket_pfx = f"{em_ticket} " if em_ticket else "\U0001f3ab "
+    arrow_pfx  = f"{em_arrow} "  if em_arrow  else "➡️ "
+    warn_pfx   = f"{em_warn} "   if em_warn   else "⚠️ "
+    bullet     = f"{em_dot} "    if em_dot    else "• "
+
     body: list = []
     body.extend(_v2_banner())
 
     body.append({"type": 10, "content": (
-        "## ⚙️ Awaiting Setup?\n"
+        f"## {gear_pfx}Awaiting Setup?\n"
         "Complete every step below, then wait for the Setup Team."
     )})
     body.append({"type": 14})
 
     body.append(_v2_section(
-        "\U0001f514 **GET SETUP PINGS ROLE**\n"
-        "• Click the button to get the **@Setup Pings** role. Click again to remove it.",
+        f"{bell_pfx}**GET SETUP PINGS ROLE**\n"
+        f"{bullet}Click the button to get the **@Setup Pings** role. Click again to remove it.",
         "Setup Pings",
         "setup_pings_toggle",
         btn_emoji_name="arrow",
@@ -580,26 +600,26 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
     body.append({"type": 14})
 
     body.append({"type": 10, "content": (
-        f"\U0001f3ab **OPEN A SETUP TICKET**\n"
-        f"• Open a setup ticket here: {ticket_ref}\n"
+        f"{ticket_pfx}**OPEN A SETUP TICKET**\n"
+        f"{bullet}Open a setup ticket here: {ticket_ref}\n"
         "-# Your Invoice ID is in your DMs."
     )})
     body.append({"type": 14})
 
     body.append({"type": 10, "content": (
-        f"\U0001f550 **WAIT FOR SETUP TEAM**\n"
-        f"• Check {alerts_ref} regularly.\n"
-        "• When a setup team member is available, ping them in your ticket **once** "
+        f"{arrow_pfx}**WAIT FOR SETUP TEAM**\n"
+        f"{bullet}Check {alerts_ref} regularly.\n"
+        f"{bullet}When a setup team member is available, ping them in your ticket **once** "
         "with your **AnyDesk code & invoice ID**."
     )})
     body.append({"type": 14})
 
     body.append({"type": 10, "content": (
-        "⚠️ **IMPORTANT**\n"
-        "• Do **NOT** ping staff unless they have announced they are available for setups."
+        f"{warn_pfx}**IMPORTANT**\n"
+        f"{bullet}Do **NOT** ping staff unless they have announced they are available for setups."
     )})
 
-    return _v2_container(body)
+    return _v2_container(body, accent=0x5865F2)
 
 
 # ─── TICKET CATEGORY LIFECYCLE ───────────────────────────────────────────────
