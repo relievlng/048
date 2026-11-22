@@ -215,6 +215,8 @@ async def send_log(
     color: int = 0x5865F2,
     fields: list = None,
     webhook_key: str = "log_webhook_url",
+    thumbnail_url: str = None,
+    footer: str = None,
 ):
     """
     Send an embed log to the appropriate staff Discord channel via webhook.
@@ -237,6 +239,10 @@ async def send_log(
             {"name": f["name"], "value": f["value"], "inline": f.get("inline", False)}
             for f in fields
         ]
+    if thumbnail_url:
+        embed["thumbnail"] = {"url": thumbnail_url}
+    if footer:
+        embed["footer"] = {"text": footer}
 
     payload = {"embeds": [embed]}
 
@@ -839,15 +845,23 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
         color=0x57F287,
     )
 
+    account_age = (datetime.now(timezone.utc) - member.created_at).days
     await send_log(
-        title=f"{e('ticket')} Ticket Opened",
+        title="Ticket Opened",
         description=(
-            f"**User** {member.mention} (`{member.id}`)\n"
-            f"**Category** {cat_info['label']}\n"
-            f"**Channel** {channel.mention}"
+            f"{member.mention}\n"
+            f"`{member.name}` - `{member.id}`"
         ),
         color=0x57F287,
         webhook_key="wh_tickets_opened",
+        thumbnail_url=str(member.display_avatar.url),
+        fields=[
+            {"name": "Category",      "value": cat_info["label"],                            "inline": True},
+            {"name": "Channel",       "value": f"[#{channel.name}]({channel.jump_url})",     "inline": True},
+            {"name": "Account Age",   "value": f"{account_age:,} days",                      "inline": True},
+            {"name": "Joined Server", "value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown", "inline": True},
+        ],
+        footer=f"User ID: {member.id}",
     )
 
 
@@ -905,34 +919,83 @@ async def close_ticket(interaction: discord.Interaction):
 
     await interaction.response.send_message("Closing ticket in 5 seconds...")
 
-    # Collect full transcript (all messages including bot ones for context)
-    messages = []
-    msg_count = 0
+    # Collect full transcript - include ALL messages (bot + user) for complete context
+    all_msgs   = []
+    user_msgs  = []
+    first_msg_ts = None
     async for msg in channel.history(limit=500, oldest_first=True):
-        msg_count += 1
-        if not msg.author.bot:
-            content = msg.content or "[attachment/embed]"
-            messages.append(f"[{msg.created_at.strftime('%Y-%m-%d %H:%M')}] {msg.author}: {content}")
-    transcript = "\n".join(messages) if messages else f"No user messages recorded ({msg_count} total)."
+        ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+        if first_msg_ts is None:
+            first_msg_ts = msg.created_at
+        content = msg.content or ("[embed]" if msg.embeds else "[attachment]" if msg.attachments else "[no content]")
+        tag  = "BOT " if msg.author.bot else "USER"
+        line = f"[{ts}] [{tag}] {msg.author.display_name}: {content}"
+        all_msgs.append(line)
+        if not msg.author.bot and msg.content:
+            user_msgs.append(f"[{ts}] {msg.author.display_name}: {content}")
 
-    # Send staff Discord logs
+    total_count = len(all_msgs)
+    user_count  = len(user_msgs)
+    transcript  = "\n".join(all_msgs) if all_msgs else "No messages recorded."
+
+    # Parse ticket opener from channel topic: "{cat_label} | {username} ({user_id})"
+    opener_mention = "Unknown"
+    opener_avatar  = None
+    cat_label      = "Unknown"
+    if channel.topic and " | " in channel.topic:
+        cat_label = channel.topic.split(" | ")[0]
+        uid_match = re.search(r'\((\d+)\)\s*$', channel.topic)
+        if uid_match:
+            opener_id  = int(uid_match.group(1))
+            opener_obj = channel.guild.get_member(opener_id)
+            if opener_obj:
+                opener_mention = f"{opener_obj.mention} `{opener_obj.name}` (`{opener_id}`)"
+                opener_avatar  = str(opener_obj.display_avatar.url)
+            else:
+                opener_mention = f"<@{opener_id}> (`{opener_id}`)"
+
+    # Duration calculation
+    duration_str = "Unknown"
+    if first_msg_ts:
+        delta = datetime.now(timezone.utc) - first_msg_ts
+        h, rem = divmod(int(delta.total_seconds()), 3600)
+        m = rem // 60
+        duration_str = f"{h}h {m}m" if h else f"{m}m"
+
+    # Ticket closed log
     await send_log(
-        title=f"{e('ticket')} Ticket Closed",
+        title="Ticket Closed",
         description=(
-            f"**Channel** {channel.name}\n"
-            f"**Closed by** {interaction.user.mention}\n"
-            f"**Messages** {msg_count}"
+            f"**Opened by** {opener_mention}\n"
+            f"**Closed by** {interaction.user.mention} `{interaction.user.name}`"
         ),
         color=0xED4245,
         webhook_key="wh_tickets_closed",
+        thumbnail_url=opener_avatar,
+        fields=[
+            {"name": "Category",  "value": cat_label,                                        "inline": True},
+            {"name": "Channel",   "value": f"#{channel.name}",                               "inline": True},
+            {"name": "Duration",  "value": duration_str,                                     "inline": True},
+            {"name": "Messages",  "value": f"{user_count} user / {total_count} total",       "inline": True},
+        ],
+        footer=f"Channel: {channel.name}",
     )
-    if transcript:
-        await send_log(
-            title=f"Transcript - {channel.name}",
-            description=f"```\n{transcript[:1900]}\n```",
-            color=0x5865F2,
-            webhook_key="wh_ticket_transcripts",
-        )
+
+    # Transcript log - show user messages as preview, full log in DM
+    preview_lines = user_msgs[-20:] if user_msgs else ["No user messages in this ticket."]
+    preview       = "\n".join(preview_lines)
+    await send_log(
+        title=f"Transcript - #{channel.name}",
+        description=f"```\n{preview[:1800]}\n```",
+        color=0x5865F2,
+        webhook_key="wh_ticket_transcripts",
+        fields=[
+            {"name": "Total Messages", "value": str(total_count), "inline": True},
+            {"name": "User Messages",  "value": str(user_count),  "inline": True},
+            {"name": "Full Transcript","value": "Sent via DM to ticket opener", "inline": True},
+        ],
+        footer=f"Category: {cat_label}",
+    )
 
     # DM the ticket opener with the full transcript as a file
     await _dm_ticket_closed(channel, interaction.user, transcript)
@@ -1007,15 +1070,24 @@ class VerifyModal(discord.ui.Modal, title="Verify Your License Key"):
             color=0x57F287,
         )
 
+        acct_age = (datetime.now(timezone.utc) - member.created_at).days
         await send_log(
-            title=f"{e('verify')} User Verified",
+            title="User Verified",
             description=(
-                f"**User** {member.mention} (`{member.id}`)\n"
-                f"**Key** `{key}`\n"
-                f"**Product** {product}"
+                f"{member.mention}\n"
+                f"`{member.name}` - `{member.id}`"
             ),
             color=0x57F287,
             webhook_key="wh_verifications",
+            thumbnail_url=str(member.display_avatar.url),
+            fields=[
+                {"name": "Key",          "value": f"`{key}`",         "inline": True},
+                {"name": "Product",      "value": product,            "inline": True},
+                {"name": "Expires",      "value": expires,            "inline": True},
+                {"name": "Account Age",  "value": f"{acct_age:,} days","inline": True},
+                {"name": "Joined Server","value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown", "inline": True},
+            ],
+            footer=f"User ID: {member.id}",
         )
 
 
@@ -1050,11 +1122,19 @@ class HWIDView(discord.ui.View):
                 f"{e('chip')} **HWID Reset Successful**\n\n{message}",
                 color=0x57F287,
             )
+            u = interaction.user
             await send_log(
-                title=f"{e('chip')} HWID Reset",
-                description=f"**User** {interaction.user.mention} (`{interaction.user.id}`)",
+                title="HWID Reset",
+                description=f"{u.mention}\n`{u.name}` - `{u.id}`",
                 color=0xFEE75C,
                 webhook_key="wh_hwid_resets",
+                thumbnail_url=str(u.display_avatar.url),
+                fields=[
+                    {"name": "User",   "value": f"`{u.name}`",  "inline": True},
+                    {"name": "ID",     "value": f"`{u.id}`",    "inline": True},
+                    {"name": "Result", "value": "Success",      "inline": True},
+                ],
+                footer=f"User ID: {u.id}",
             )
         else:
             await _reply_v2(
@@ -1246,11 +1326,19 @@ async def hwid_reset_cmd(interaction: discord.Interaction):
             f"{e('chip')} **HWID Reset Successful**\n\n{message}",
             color=0x57F287,
         )
+        u = interaction.user
         await send_log(
-            title=f"{e('chip')} HWID Reset",
-            description=f"**User** {interaction.user.mention} (`{interaction.user.id}`)",
+            title="HWID Reset",
+            description=f"{u.mention}\n`{u.name}` - `{u.id}`",
             color=0xFEE75C,
             webhook_key="wh_hwid_resets",
+            thumbnail_url=str(u.display_avatar.url),
+            fields=[
+                {"name": "User",   "value": f"`{u.name}`", "inline": True},
+                {"name": "ID",     "value": f"`{u.id}`",   "inline": True},
+                {"name": "Result", "value": "Success",     "inline": True},
+            ],
+            footer=f"User ID: {u.id}",
         )
     else:
         await _reply_v2(
