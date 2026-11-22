@@ -55,6 +55,7 @@ CONFIG = {
     "key_prefix":              env("KEY_PREFIX", "KL"),
     "api_port":                env_int("PORT", 8080),
     "max_hwid_resets":         env_int("MAX_HWID_RESETS", 1),
+    "logo_url":                env("LOGO_URL"),
 }
 
 # ─── CUSTOM EMOJIS ────────────────────────────────────────────────────────────
@@ -204,14 +205,28 @@ def start_health_server(port: int):
     t.start()
     log.info(f"Health server on :{port}")
 
-# ─── COMPONENTS v2 HELPERS ────────────────────────────────────────────────────
+# ─── EMBED HELPERS ────────────────────────────────────────────────────────────
+# channel.send() does not accept components= in this discord.py build.
+# Regular channel/interaction sends use discord.Embed; Components v2 JSON
+# is used only for log webhooks (sent via raw aiohttp in send_log).
 
-def _container(text: str, color: int = 0x2b2d31) -> discord.ui.Container:
-    """Build a Components v2 Container with a single TextDisplay child."""
-    return discord.ui.Container(
-        discord.ui.TextDisplay(text),
-        accent_colour=discord.Colour(color),
-    )
+def _make_embed(text: str, color: int = 0x2b2d31) -> discord.Embed:
+    """Convert markdown-formatted panel text into a discord.Embed.
+    The first '## Heading' line becomes the embed title; the rest is description.
+    If LOGO_URL is set, the logo appears as a thumbnail in the top-right corner."""
+    lines = text.split('\n')
+    title = ""
+    desc_lines = []
+    for line in lines:
+        if line.startswith('## ') and not title:
+            title = line[3:].strip()
+        else:
+            desc_lines.append(line)
+    description = '\n'.join(desc_lines).strip()
+    embed = discord.Embed(title=title, description=description, color=color)
+    if CONFIG.get("logo_url"):
+        embed.set_thumbnail(url=CONFIG["logo_url"])
+    return embed
 
 async def _send_v2(
     channel: discord.TextChannel,
@@ -219,10 +234,8 @@ async def _send_v2(
     color: int = 0x2b2d31,
     view: discord.ui.View = None,
 ):
-    """Send a Components v2 message to a channel."""
-    kwargs = {
-        "components": [_container(text, color)],
-    }
+    """Send a panel embed to a channel."""
+    kwargs: dict = {"embed": _make_embed(text, color)}
     if view:
         kwargs["view"] = view
     await channel.send(**kwargs)
@@ -233,9 +246,9 @@ async def _reply_v2(
     color: int = 0x2b2d31,
     ephemeral: bool = True,
 ):
-    """Respond to an interaction with a Components v2 message."""
+    """Respond to an interaction with an embed."""
     await interaction.response.send_message(
-        components=[_container(text, color)],
+        embed=_make_embed(text, color),
         ephemeral=ephemeral,
     )
 
@@ -332,7 +345,7 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
     mention_str = admin_role.mention if admin_role else ""
     await channel.send(
         content=f"{member.mention} {mention_str}",
-        components=[_container(text, 0x2b2d31)],
+        embed=_make_embed(text, 0x2b2d31),
         view=TicketControlView(),
     )
 
@@ -587,10 +600,7 @@ async def setup_tickets(interaction: discord.Interaction):
         "Choose a category below. A private channel opens and staff meet you there.\n\n"
         f"{cats}"
     )
-    await interaction.channel.send(
-        components=[_container(text, 0x2b2d31)],
-        view=TicketPanelView(),
-    )
+    await _send_v2(interaction.channel, text, color=0x2b2d31, view=TicketPanelView())
     await interaction.followup.send(f"{e('verify')} Ticket panel posted.", ephemeral=True)
 
 
@@ -605,10 +615,7 @@ async def setup_verify(interaction: discord.Interaction):
         f"{e('key')} Your key is linked to your Discord account permanently.\n\n"
         "-# One key per Discord account."
     )
-    await interaction.channel.send(
-        components=[_container(text, 0x2b2d31)],
-        view=VerifyView(),
-    )
+    await _send_v2(interaction.channel, text, color=0x2b2d31, view=VerifyView())
     await interaction.followup.send(f"{e('verify')} Verification panel posted.", ephemeral=True)
 
 
@@ -624,10 +631,7 @@ async def setup_hwid(interaction: discord.Interaction):
         f"{e('ticket')} Used all resets? Open a ticket in the Key / HWID category.\n\n"
         "-# HWID resets are logged and monitored."
     )
-    await interaction.channel.send(
-        components=[_container(text, 0x2b2d31)],
-        view=HWIDView(),
-    )
+    await _send_v2(interaction.channel, text, color=0x2b2d31, view=HWIDView())
     await interaction.followup.send(f"{e('verify')} HWID panel posted.", ephemeral=True)
 
 
@@ -656,7 +660,7 @@ async def setup_rules(interaction: discord.Interaction):
         f"{rule_lines}\n\n"
         "-# Last updated by staff"
     )
-    await interaction.channel.send(components=[_container(text, 0x2b2d31)])
+    await _send_v2(interaction.channel, text, color=0x2b2d31)
     await interaction.followup.send(f"{e('verify')} Rules posted.", ephemeral=True)
 
 
@@ -681,10 +685,7 @@ async def setup_info_cmd(interaction: discord.Interaction):
         f"{e('warn')} Do **NOT** ping staff unless they have announced they are available for setups.\n\n"
         "-# Failing to follow these steps may delay your setup."
     )
-    await interaction.channel.send(
-        components=[_container(text, 0x2b2d31)],
-        view=SetupPingsView(),
-    )
+    await _send_v2(interaction.channel, text, color=0x2b2d31, view=SetupPingsView())
     await interaction.followup.send(f"{e('verify')} Setup info posted.", ephemeral=True)
 
 
