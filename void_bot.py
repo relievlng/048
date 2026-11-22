@@ -400,7 +400,7 @@ PRODUCTS = {
             ("3 Months", "$110"),
             ("Lifetime", "$250"),
         ],
-        "accent":    0x5865F2,
+        "accent":    BRAND_COLOR,
         "emoji_key": "shield",
     },
     "private": {
@@ -430,7 +430,7 @@ PRODUCTS = {
             ("6 Months", "$270"),
             ("Lifetime", "$325"),
         ],
-        "accent":    0xFEE75C,
+        "accent":    BRAND_COLOR,
         "emoji_key": "lock",
     },
 }
@@ -463,6 +463,7 @@ def _ticket_panel_payload() -> dict:
             cat["label"],
             f"void_ticket_open_{cat_id}",
             btn_emoji_name=cat["emoji_key"],
+            btn_style=1,
         ))
     return _v2_container(body, accent=BRAND_COLOR)
 
@@ -530,18 +531,18 @@ def _product_panel_payload(product_id: str) -> dict:
     if p["invite_only"]:
         body.append(_v2_section(
             f"{warn_pfx}**REQUEST ACCESS**\n{bullet}Contact staff or an existing private member to get an invite.",
-            "OPEN TICKET",
+            "Open Ticket",
             "void_ticket_open_purchase",
             btn_emoji_name="key",
-            btn_style=3,
+            btn_style=1,
         ))
     else:
         body.append(_v2_section(
             f"{key_pfx}**SECURE YOUR ACCESS**\n{bullet}Start your order by opening a support ticket.",
-            "BUY NOW",
+            "Buy Now",
             "void_ticket_open_purchase",
             btn_emoji_name="key",
-            btn_style=3,
+            btn_style=1,
         ))
     return _v2_container(body, accent=p["accent"])
 
@@ -597,23 +598,28 @@ def _verify_panel_payload() -> dict:
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
         f"## {lock_pfx}Verification\n"
-        "Confirm your purchase to unlock full access to the server."
+        "Already bought from us? Click Verify below to unlock your server role."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
         f"{ticket_pfx}**HOW IT WORKS**\n"
-        f"{bullet}Your Discord account is automatically linked when you buy.\n"
-        f"{bullet}Hit Verify and answer one quick question to prove you're human.\n"
-        f"{bullet}Lost your role? Click Verify again at any time."
+        f"{bullet}Your Discord account is linked to your order when you buy.\n"
+        f"{bullet}Click Verify and answer a quick spam check to get your role.\n"
+        f"{bullet}Lost your role? You can verify again at any time."
+    )})
+    body.append({"type": 14})
+    body.append({"type": 10, "content": (
+        f"{ticket_pfx}**HAVEN'T PURCHASED YET?**\n"
+        f"{bullet}Check out our products and open a ticket to get started."
     )})
     body.append({"type": 14})
     body.append(_v2_section(
-        f"{verify_pfx}**READY TO VERIFY?**\n"
-        f"{bullet}No Invoice ID or key needed - just click the button.",
+        f"{verify_pfx}**HAVE AN ORDER?**\n"
+        f"{bullet}No Invoice ID or key - just click the button below.",
         "Verify",
         "void_verify_button",
         btn_emoji_name="verify",
-        btn_style=3,
+        btn_style=1,
     ))
     return _v2_container(body, accent=BRAND_COLOR)
 
