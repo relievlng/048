@@ -1,7 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <rect x="28" y="18" width="72" height="92" rx="8" fill="none" stroke="#B8BCC8" stroke-width="7"/>
-  <line x1="44" y1="44" x2="84" y2="44" stroke="#B8BCC8" stroke-width="5" stroke-linecap="round"/>
-  <line x1="44" y1="58" x2="84" y2="58" stroke="#B8BCC8" stroke-width="5" stroke-linecap="round"/>
-  <line x1="44" y1="72" x2="84" y2="72" stroke="#B8BCC8" stroke-width="5" stroke-linecap="round"/>
-  <line x1="44" y1="86" x2="66" y2="86" stroke="#B8BCC8" stroke-width="5" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Document with lines - Rules -->
+  <path fill="white" d="M24,8 h56 l24,24 v88 a8,8 0 0 1 -8,8 h-72 a8,8 0 0 1 -8,-8 v-104 a8,8 0 0 1 8,-8 z"/>
+  <path fill="#2b2d31" d="M80,8 v20 a4,4 0 0 0 4,4 h20 z"/>
+  <rect fill="#2b2d31" x="36" y="52" width="56" height="9" rx="4.5"/>
+  <rect fill="#2b2d31" x="36" y="68" width="56" height="9" rx="4.5"/>
+  <rect fill="#2b2d31" x="36" y="84" width="38" height="9" rx="4.5"/>
 </svg>

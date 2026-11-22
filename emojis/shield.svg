@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <path d="M64 18 L100 32 L100 68 Q100 96 64 112 Q28 96 28 68 L28 32 Z" fill="none" stroke="#B8BCC8" stroke-width="7" stroke-linejoin="round"/>
-  <polyline points="46,66 58,78 82,52" fill="none" stroke="#B8BCC8" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Shopping bag - Purchase -->
+  <path fill="white" d="M42,32 a22,22 0 0 1 44,0 h16 a8,8 0 0 1 8,8 l-10,68 a8,8 0 0 1 -8,8 h-56 a8,8 0 0 1 -8,-8 l-10,-68 a8,8 0 0 1 8,-8 z"/>
+  <path fill="#2b2d31" d="M50,32 a14,14 0 0 1 28,0"/>
 </svg>

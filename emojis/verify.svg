@@ -1,4 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <circle cx="64" cy="64" r="52" fill="none" stroke="#B8BCC8" stroke-width="8"/>
-  <polyline points="38,66 56,84 90,46" fill="none" stroke="#B8BCC8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Shield with checkmark - Verify -->
+  <path fill="white" d="M64,8 L112,28 L112,64 C112,92 90,110 64,120 C38,110 16,92 16,64 L16,28 Z"/>
+  <polyline fill="none" stroke="#2b2d31" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" points="40,66 56,82 90,48"/>
 </svg>
