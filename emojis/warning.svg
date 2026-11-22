@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <!-- Triangle outline (slightly larger, for a border effect) -->
-  <path d="M64 8 L122 112 L6 112 Z" fill="#f0a500"/>
+  <!-- Triangle border -->
+  <path d="M64 8 L122 112 L6 112 Z" fill="#80848E"/>
   <!-- Main triangle -->
-  <path d="M64 16 L116 110 L12 110 Z" fill="#FEE75C"/>
+  <path d="M64 16 L116 110 L12 110 Z" fill="#B5BAC1"/>
   <!-- Exclamation stem -->
-  <rect x="59" y="46" width="10" height="36" rx="5" fill="#2C2F33"/>
+  <rect x="59" y="46" width="10" height="36" rx="5" fill="#5C6069"/>
   <!-- Exclamation dot -->
-  <circle cx="64" cy="94" r="6.5" fill="#2C2F33"/>
+  <circle cx="64" cy="94" r="6.5" fill="#5C6069"/>
 </svg>

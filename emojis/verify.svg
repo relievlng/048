@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <!-- Shield body -->
-  <path d="M64 10 L110 30 L110 68 C110 96 90 115 64 122 C38 115 18 96 18 68 L18 30 Z" fill="#57F287"/>
-  <!-- Inner shield highlight -->
-  <path d="M64 20 L104 38 L104 68 C104 92 86 109 64 115 C42 109 24 92 24 68 L24 38 Z" fill="#43c76e" opacity="0.35"/>
+  <path d="M64 10 L110 30 L110 68 C110 96 90 115 64 122 C38 115 18 96 18 68 L18 30 Z" fill="#949BA4"/>
+  <!-- Inner shield bevel -->
+  <path d="M64 20 L104 38 L104 68 C104 92 86 109 64 115 C42 109 24 92 24 68 L24 38 Z" fill="#B5BAC1" opacity="0.3"/>
   <!-- Checkmark -->
   <polyline points="40,65 56,82 90,44" fill="none" stroke="white" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

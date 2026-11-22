@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <!-- Lock body -->
-  <rect x="20" y="58" width="88" height="62" rx="12" fill="#57F287"/>
+  <rect x="20" y="58" width="88" height="62" rx="12" fill="#949BA4"/>
   <!-- Body top highlight -->
   <rect x="20" y="58" width="88" height="22" rx="12" fill="white" opacity="0.12"/>
-  <!-- Shackle arc (outer stroke) -->
+  <!-- Shackle arc (outer) -->
   <path d="M38 60 L38 42 Q38 18 64 18 Q90 18 90 42 L90 60"
-        fill="none" stroke="#43c76e" stroke-width="16" stroke-linecap="round"/>
+        fill="none" stroke="#80848E" stroke-width="16" stroke-linecap="round"/>
   <!-- Shackle arc (inner lighter) -->
   <path d="M46 60 L46 44 Q46 28 64 28 Q82 28 82 44 L82 60"
-        fill="none" stroke="#6bdfa0" stroke-width="4" stroke-linecap="round"/>
+        fill="none" stroke="#B5BAC1" stroke-width="4" stroke-linecap="round"/>
   <!-- Keyhole body -->
-  <circle cx="64" cy="84" r="12" fill="#2cac6a"/>
+  <circle cx="64" cy="84" r="12" fill="#6D7177"/>
   <!-- Keyhole stem -->
-  <rect x="60" y="84" width="8" height="18" rx="4" fill="#2cac6a"/>
+  <rect x="60" y="84" width="8" height="18" rx="4" fill="#6D7177"/>
 </svg>

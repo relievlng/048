@@ -7,9 +7,9 @@
     </mask>
   </defs>
   <!-- Ticket base -->
-  <rect x="8" y="34" width="112" height="60" rx="8" fill="#EB459E" mask="url(#tm)"/>
+  <rect x="8" y="34" width="112" height="60" rx="8" fill="#949BA4" mask="url(#tm)"/>
   <!-- Stub shading -->
-  <rect x="8" y="34" width="38" height="60" rx="8" fill="#D2367A" mask="url(#tm)"/>
+  <rect x="8" y="34" width="38" height="60" rx="8" fill="#80848E" mask="url(#tm)"/>
   <!-- Perforation line -->
   <line x1="46" y1="38" x2="46" y2="90" stroke="rgba(255,255,255,0.45)" stroke-width="2" stroke-dasharray="5,4"/>
   <!-- Ticket lines on main body -->

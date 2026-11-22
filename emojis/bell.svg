@@ -1,15 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <!-- Bell top stem -->
-  <rect x="58" y="10" width="12" height="18" rx="6" fill="#FEE75C"/>
+  <rect x="58" y="10" width="12" height="18" rx="6" fill="#B5BAC1"/>
   <!-- Bell body -->
-  <path d="M64 24 C40 24 24 44 24 70 L24 84 L14 96 L114 96 L104 84 L104 70 C104 44 88 24 64 24 Z" fill="#FEE75C"/>
+  <path d="M64 24 C40 24 24 44 24 70 L24 84 L14 96 L114 96 L104 84 L104 70 C104 44 88 24 64 24 Z" fill="#949BA4"/>
   <!-- Bell rim -->
-  <ellipse cx="64" cy="96" rx="52" ry="10" fill="#f0d535"/>
+  <ellipse cx="64" cy="96" rx="52" ry="10" fill="#80848E"/>
   <!-- Clapper -->
-  <circle cx="64" cy="108" r="10" fill="#FEE75C"/>
-  <line x1="64" y1="96" x2="64" y2="108" stroke="#f0d535" stroke-width="5"/>
+  <circle cx="64" cy="108" r="10" fill="#949BA4"/>
+  <line x1="64" y1="96" x2="64" y2="108" stroke="#80848E" stroke-width="5"/>
   <!-- Bell highlight (left sheen) -->
-  <path d="M46 32 C38 44 32 58 32 72 L32 82 L40 82 L40 70 C40 56 46 44 54 34 Z" fill="white" opacity="0.18"/>
-  <!-- Bell shadow line (right) -->
-  <path d="M82 30 C90 44 96 58 96 72 L96 82 L92 82 L92 70 C92 56 88 44 80 32 Z" fill="#d4b800" opacity="0.2"/>
+  <path d="M46 32 C38 44 32 58 32 72 L32 82 L40 82 L40 70 C40 56 46 44 54 34 Z" fill="white" opacity="0.15"/>
 </svg>

@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <!-- Key bow (ring) -->
-  <circle cx="42" cy="52" r="24" fill="none" stroke="#FEE75C" stroke-width="12"/>
+  <circle cx="42" cy="52" r="24" fill="none" stroke="#949BA4" stroke-width="12"/>
   <!-- Key hole -->
-  <circle cx="42" cy="52" r="8" fill="#FEE75C" opacity="0.3"/>
+  <circle cx="42" cy="52" r="8" fill="#B5BAC1" opacity="0.4"/>
   <!-- Key shaft -->
-  <rect x="62" y="47" width="54" height="11" rx="5" fill="#FEE75C"/>
+  <rect x="62" y="47" width="54" height="11" rx="5" fill="#949BA4"/>
   <!-- Tooth 1 -->
-  <rect x="82" y="58" width="10" height="18" rx="4" fill="#FEE75C"/>
+  <rect x="82" y="58" width="10" height="18" rx="4" fill="#949BA4"/>
   <!-- Tooth 2 -->
-  <rect x="102" y="58" width="10" height="13" rx="4" fill="#FEE75C"/>
+  <rect x="102" y="58" width="10" height="13" rx="4" fill="#949BA4"/>
 </svg>

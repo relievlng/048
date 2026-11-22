@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
   <!-- Outer ring -->
-  <circle cx="64" cy="64" r="38" fill="#5865F2"/>
+  <circle cx="64" cy="64" r="38" fill="#949BA4"/>
   <!-- Middle ring -->
-  <circle cx="64" cy="64" r="28" fill="#4752C4"/>
+  <circle cx="64" cy="64" r="28" fill="#80848E"/>
   <!-- Inner fill -->
-  <circle cx="64" cy="64" r="16" fill="white"/>
+  <circle cx="64" cy="64" r="16" fill="#DCDDDE"/>
 </svg>
