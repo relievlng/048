@@ -543,7 +543,7 @@ def _rules_panel_payload() -> dict:
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {rules_pfx}Server Rules\n"
+        f"# {rules_pfx}Server Rules\n"
         "-# By using this server and our software you agree to all rules below. "
         "Violations may result in key termination or permanent blacklisting."
     )})
@@ -615,7 +615,7 @@ def _rules_panel_payload() -> dict:
     body.append({"type": 14})
 
     body.append({"type": 10, "content": "-# Last updated by staff"})
-    return _v2_container(body, accent=0xED4245)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
@@ -636,15 +636,18 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
     body: list = []
     body.extend(_v2_banner())
 
+    pings_role_id = CONFIG.get("setup_pings_role_id")
+    role_ref = f"<@&{pings_role_id}>" if pings_role_id else "@Setup Pings"
+
     body.append({"type": 10, "content": (
-        f"## {gear_pfx}Awaiting Setup?\n"
+        f"# {gear_pfx}Awaiting Setup?\n"
         "Complete every step below, then wait for the Setup Team."
     )})
     body.append({"type": 14})
 
     body.append(_v2_section(
         f"{bell_pfx}**GET SETUP PINGS ROLE**\n"
-        f"{bullet}Click the button to get the **@Setup Pings** role. Click again to remove it.",
+        f"{bullet}Click the button to get the {role_ref} role. Click again to remove it.",
         "Setup Pings",
         "setup_pings_toggle",
         btn_emoji_name="arrow",
@@ -671,7 +674,7 @@ def _setup_info_payload(ticket_ref: str, alerts_ref: str) -> dict:
         f"{bullet}Do **NOT** ping staff unless they have announced they are available for setups."
     )})
 
-    return _v2_container(body, accent=0x5865F2)
+    return _v2_container(body, accent=BRAND_COLOR)
 
 
 # ─── TICKET CATEGORY LIFECYCLE ───────────────────────────────────────────────
