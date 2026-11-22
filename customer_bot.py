@@ -896,8 +896,8 @@ TICKET_CATEGORIES = {
 
 # ─── TICKET COUNTER ───────────────────────────────────────────────────────────
 
-def _init_ticket_counter():
-    """Ensure the ticket_counter table exists."""
+def _ensure_tables():
+    """Ensure all required tables exist (safe to call multiple times)."""
     with get_db() as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS ticket_counter "
@@ -906,7 +906,26 @@ def _init_ticket_counter():
         conn.execute(
             "INSERT OR IGNORE INTO ticket_counter (id, next_num) VALUES (1, 1)"
         )
+        # void_tickets is owned by void_bot but we read it - ensure it exists
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS void_tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id TEXT,
+                user_id TEXT,
+                category TEXT,
+                status TEXT DEFAULT 'open',
+                invoice_id TEXT,
+                paid_at TEXT,
+                closed_at TEXT,
+                transcript TEXT,
+                created_at TEXT
+            )"""
+        )
         conn.commit()
+
+def _init_ticket_counter():
+    """Ensure the ticket_counter table exists."""
+    _ensure_tables()
 
 def get_next_ticket_number() -> int:
     """Atomically increment and return the next ticket number."""
@@ -1590,70 +1609,67 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         invoice_id = self.invoice_input.value.strip().upper()
         member     = interaction.user
         guild      = interaction.guild
 
-        with get_db() as conn:
-            ticket = conn.execute(
-                "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
-            ).fetchone()
+        try:
+            with get_db() as conn:
+                ticket = conn.execute(
+                    "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
+                ).fetchone()
+        except Exception as ex:
+            log.error("DB error during verification user=%s: %s", member.id, ex)
+            await interaction.followup.send(
+                "Database error. Contact staff.", ephemeral=True
+            )
+            return
 
         if not ticket:
-            await _reply_v2(
-                interaction,
-                f"{e('cross')} **Invoice ID not found.**\nDouble-check the ID from your DM and try again.",
-                color=0xED4245,
+            await interaction.followup.send(
+                "Invoice ID not found. Double-check the ID from your DM and try again.",
+                ephemeral=True,
             )
             return
 
         if ticket["user_id"] != str(member.id):
-            await _reply_v2(
-                interaction,
-                f"{e('cross')} **Invoice ID does not match your account.**\nContact staff if you believe this is an error.",
-                color=0xED4245,
+            await interaction.followup.send(
+                "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong.",
+                ephemeral=True,
             )
             return
 
-        verified_role = guild.get_role(CONFIG["verified_role_id"])
+        # Assign verified role
+        verified_role = guild.get_role(CONFIG["verified_role_id"]) if guild else None
         role_assigned = False
-        if verified_role and verified_role not in member.roles:
-            try:
-                await member.add_roles(verified_role, reason=f"Invoice verification {invoice_id}")
-                role_assigned = True
-            except Exception as ex:
-                log.warning("Could not assign verified role user=%s: %s", member.id, ex)
-        else:
-            role_assigned = True  # already has role - re-setup case
+        if verified_role:
+            if verified_role not in member.roles:
+                try:
+                    await member.add_roles(verified_role, reason=f"Invoice {invoice_id}")
+                    role_assigned = True
+                except Exception as ex:
+                    log.warning("Could not assign verified role user=%s: %s", member.id, ex)
+            else:
+                role_assigned = True  # already had it
 
-        status_line = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
-        await _reply_v2(
-            interaction,
-            (
-                f"{e('verify')} **Verified successfully.**\n"
-                f"{status_line}\n\n"
-                f"**Invoice** `{invoice_id}`"
-            ),
-            color=0x57F287,
+        status = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
+        await interaction.followup.send(
+            f"Verified. {status}", ephemeral=True
         )
 
-        acct_age = (datetime.now(timezone.utc) - member.created_at).days
-        await send_log(
-            title="User Verified",
-            description=(
-                f"{member.mention}\n"
-                f"`{member.name}` - `{member.id}`"
-            ),
-            color=0x57F287,
-            webhook_key="wh_verifications",
-            thumbnail_url=str(member.display_avatar.url),
-            fields=[
-                {"name": "Invoice ID",   "value": f"`{invoice_id}`",  "inline": True},
-                {"name": "Account Age",  "value": f"{acct_age:,} days","inline": True},
-                {"name": "Joined Server","value": f"<t:{int(member.joined_at.timestamp())}:R>" if member.joined_at else "Unknown", "inline": True},
-            ],
-            footer=f"User ID: {member.id}",
-        )
+        log.info("Verified user=%s invoice=%s role_assigned=%s", member.id, invoice_id, role_assigned)
+        try:
+            await send_log(
+                title="User Verified",
+                description=f"{member.mention} (`{member.name}` - `{member.id}`)",
+                color=0x57F287,
+                webhook_key="wh_verifications",
+                fields=[{"name": "Invoice ID", "value": f"`{invoice_id}`", "inline": True}],
+                footer=f"User ID: {member.id}",
+            )
+        except Exception as ex:
+            log.warning("Verify log failed: %s", ex)
 
 
 class VerifyView(discord.ui.View):
@@ -1748,6 +1764,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    _ensure_tables()
     log.info(f"Customer Bot ready as {bot.user} ({bot.user.id})")
     if _webhooks_loaded:
         log.info("Loaded %d webhook URL(s) from /data/webhooks.env", _webhooks_loaded)
