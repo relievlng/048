@@ -19,6 +19,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
+import json
 
 # ─── ENV / CONFIG ─────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ CONFIG = {
     "customer_cl_webhook":  env("VOID_CUSTOMER_CHANGELOG_WEBHOOK", ""),
     "db_path":              env("DB_PATH",                       "/data/keylock.db"),
     "api_port":             env_int("VOID_PORT", env_int("PORT", 8081)),
+    "internal_api_key":     env("INTERNAL_API_KEY", ""),
     "customer_guild_id":    env_int("VOID_CUSTOMER_GUILD_ID"),
     "key_prefix":           env("VOID_KEY_PREFIX", "VD"),
 }
@@ -1356,6 +1358,62 @@ class _Health(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
+
+    def do_POST(self):
+        if self.path != "/verify":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        expected_key = CONFIG.get("internal_api_key", "")
+        if expected_key and body.get("api_key") != expected_key:
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b'{"error":"forbidden"}')
+            return
+
+        invoice_id = (body.get("invoice_id") or "").strip().upper()
+        discord_id = str(body.get("discord_id") or "").strip()
+
+        try:
+            conn = sqlite3.connect(CONFIG["db_path"])
+            conn.row_factory = sqlite3.Row
+            ticket = conn.execute(
+                "SELECT user_id, product FROM void_tickets WHERE invoice_id=?",
+                (invoice_id,)
+            ).fetchone()
+            conn.close()
+        except Exception as ex:
+            resp_data = json.dumps({"error": str(ex)}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_data)))
+            self.end_headers()
+            self.wfile.write(resp_data)
+            return
+
+        if not ticket:
+            resp = {"valid": False, "reason": "not_found"}
+        elif ticket["user_id"] != discord_id:
+            resp = {"valid": False, "reason": "wrong_user"}
+        else:
+            resp = {"valid": True, "invoice_id": invoice_id,
+                    "product": ticket["product"] if "product" in ticket.keys() else None}
+
+        resp_data = json.dumps(resp).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp_data)))
+        self.end_headers()
+        self.wfile.write(resp_data)
+
     def log_message(self, *args):
         pass
 

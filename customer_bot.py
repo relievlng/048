@@ -113,6 +113,8 @@ CONFIG = {
     "db_path":                 env("DB_PATH", "/data/keylock.db"),
     "key_prefix":              env("KEY_PREFIX", "KL"),
     "api_port":                env_int("PORT", 8080),
+    "void_bot_url":            env("VOID_BOT_URL", ""),
+    "internal_api_key":        env("INTERNAL_API_KEY", ""),
     "max_hwid_resets":         env_int("MAX_HWID_RESETS", 1),
     "logo_url":                env("LOGO_URL"),
 }
@@ -1614,34 +1616,42 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         member     = interaction.user
         guild      = interaction.guild
 
+        void_url  = CONFIG.get("void_bot_url", "").rstrip("/")
+        api_key   = CONFIG.get("internal_api_key", "")
+
+        if not void_url:
+            await interaction.followup.send(
+                "Verification service not configured. Contact staff.", ephemeral=True
+            )
+            return
+
+        # Call void_bot's /verify endpoint
         try:
-            with get_db() as conn:
-                ticket = conn.execute(
-                    "SELECT * FROM void_tickets WHERE invoice_id=?", (invoice_id,)
-                ).fetchone()
-                # Debug: log total ticket count so we can confirm DB is shared
-                total = conn.execute("SELECT COUNT(*) FROM void_tickets").fetchone()[0]
-                log.info("Verify attempt user=%s invoice=%s db_ticket_count=%d found=%s",
-                         member.id, invoice_id, total, ticket is not None)
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{void_url}/verify",
+                    json={"invoice_id": invoice_id, "discord_id": str(member.id), "api_key": api_key},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+                data = await resp.json(content_type=None)
         except Exception as ex:
-            log.error("DB error during verification user=%s: %s", member.id, ex)
+            log.error("Verify HTTP call failed user=%s: %s", member.id, ex)
             await interaction.followup.send(
-                "Database error. Contact staff.", ephemeral=True
+                "Verification service unreachable. Contact staff.", ephemeral=True
             )
             return
 
-        if not ticket:
-            await interaction.followup.send(
-                "Invoice ID not found. Double-check the ID from your DM and try again.",
-                ephemeral=True,
-            )
-            return
+        log.info("Verify response user=%s invoice=%s data=%s", member.id, invoice_id, data)
 
-        if ticket["user_id"] != str(member.id):
-            await interaction.followup.send(
-                "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong.",
-                ephemeral=True,
-            )
+        if not data.get("valid"):
+            reason = data.get("reason", "unknown")
+            if reason == "not_found":
+                msg = "Invoice ID not found. Double-check the ID from your DM and try again."
+            elif reason == "wrong_user":
+                msg = "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong."
+            else:
+                msg = f"Verification failed ({reason}). Contact staff."
+            await interaction.followup.send(msg, ephemeral=True)
             return
 
         # Assign verified role
@@ -1658,9 +1668,7 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
                 role_assigned = True  # already had it
 
         status = "You now have access to the server." if role_assigned else "Role could not be assigned - contact staff."
-        await interaction.followup.send(
-            f"Verified. {status}", ephemeral=True
-        )
+        await interaction.followup.send(f"Verified. {status}", ephemeral=True)
 
         log.info("Verified user=%s invoice=%s role_assigned=%s", member.id, invoice_id, role_assigned)
         try:
