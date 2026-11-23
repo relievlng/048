@@ -247,6 +247,8 @@ def init_db(path: str) -> sqlite3.Connection:
         "ALTER TABLE tickets ADD COLUMN resolution TEXT",
         "ALTER TABLE tickets ADD COLUMN transcript TEXT",
         "ALTER TABLE tickets ADD COLUMN assigned_to TEXT",
+        "ALTER TABLE tickets ADD COLUMN product TEXT",
+        "ALTER TABLE tickets ADD COLUMN expires_at TEXT",
         "ALTER TABLE audit_log ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'void'",
         "ALTER TABLE key_pool ADD COLUMN invoice_id TEXT",
     ]:
