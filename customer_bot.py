@@ -87,6 +87,7 @@ CONFIG = {
     "token":                   env("DISCORD_TOKEN") or env("TOKEN"),
     "guild_id":                env_int("GUILD_ID"),
     "admin_role_id":           env_int("ADMIN_ROLE_ID"),
+    "management_role_id":      env_int("MANAGEMENT_ROLE_ID"),
     "verified_role_id":        env_int("VERIFIED_ROLE_ID"),
     "setup_pings_role_id":     env_int("SETUP_PINGS_ROLE_ID"),
     "setup_alerts_channel_id": env_int("SETUP_ALERTS_CHANNEL_ID"),
@@ -96,6 +97,7 @@ CONFIG = {
     "ticket_cat_setup":        env_int("TICKET_CAT_SETUP"),
     "ticket_cat_purchase":     env_int("TICKET_CAT_PURCHASE"),
     "ticket_cat_management":   env_int("TICKET_CAT_MANAGEMENT"),
+    "ticket_cat_hwid_reset":   env_int("TICKET_CAT_HWID_RESET"),
     "rules_channel_id":        env_int("RULES_CHANNEL_ID"),
     "verify_channel_id":       env_int("VERIFY_CHANNEL_ID"),
     "hwid_channel_id":         env_int("HWID_CHANNEL_ID"),
@@ -524,14 +526,14 @@ def _ticket_panel_payload() -> dict:
         # Re-Setup sits right after Setup in the panel
         if cat_id == "setup":
             body.append({"type": 14})
-            em_rs = _emoji_in_text("verify")
+            em_rs = _emoji_in_text("gear")
             rs_prefix = f"{em_rs} " if em_rs else ""
             body.append(_v2_section(
                 f"{rs_prefix}**Re-Setup** - Already set up? Open a re-setup request",
                 "Re-Setup",
                 "ticket_open_resetup",
-                btn_emoji_name="verify",
-                btn_style=2,  # Match other buttons
+                btn_emoji_name="gear",
+                btn_style=2,
             ))
     return _v2_container(body, accent=BRAND_COLOR)
 
@@ -816,14 +818,23 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
     # None found anywhere - create the category now
     log.info("Creating new Discord category %s for ticket type %s", cat_name, cat_id)
     admin_role = guild.get_role(CONFIG["admin_role_id"])
+    mgmt_role  = guild.get_role(CONFIG["management_role_id"])
     overwrites: dict = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
     }
-    if admin_role:
-        overwrites[admin_role] = discord.PermissionOverwrite(
-            view_channel=True, manage_channels=True,
-            send_messages=True, read_message_history=True,
-        )
+    # FAC resetting category: management only; all others: admin role
+    if cat_id == "hwid_reset":
+        if mgmt_role:
+            overwrites[mgmt_role] = discord.PermissionOverwrite(
+                view_channel=True, manage_channels=True,
+                send_messages=True, read_message_history=True,
+            )
+    else:
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                view_channel=True, manage_channels=True,
+                send_messages=True, read_message_history=True,
+            )
 
     base_cat = guild.get_channel(CONFIG.get("ticket_category_id") or 0)
     position = (base_cat.position + 1) if base_cat else 0
@@ -1062,10 +1073,11 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "crown",       "desc": "Purchase or renew a product",         "config_key": "ticket_cat_purchase"},
-    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "description", "desc": "First time setup assistance",         "config_key": "ticket_cat_setup"},
-    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "support",     "desc": "Product support or general enquiries","config_key": "ticket_cat_support"},
-    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "shield",      "desc": "Account or management requests",      "config_key": "ticket_cat_management"},
+    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",    "emoji_key": "crown",   "desc": "Purchase or renew a product",          "config_key": "ticket_cat_purchase"},
+    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",       "emoji_key": "description", "desc": "First time setup assistance",      "config_key": "ticket_cat_setup"},
+    "hwid_reset": {"label": "FAC Resetting",      "cat_name": "FAC-Resetting",    "channel_prefix": "fac-reset",   "emoji_key": "chip",    "desc": "Open a ticket to get authorised to FAC", "config_key": "ticket_cat_hwid_reset"},
+    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",     "emoji_key": "support", "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
+    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management",  "emoji_key": "shield",  "desc": "Account or management requests",       "config_key": "ticket_cat_management"},
 }
 
 # ─── TICKET COUNTER ───────────────────────────────────────────────────────────
@@ -1460,7 +1472,7 @@ class TicketPanelView(discord.ui.View):
         # Re-Setup button: for existing customers needing setup help again
         resetup_btn = discord.ui.Button(
             label="Re-Setup",
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             custom_id="ticket_open_resetup",
         )
         resetup_btn.callback = self._resetup_callback
@@ -1528,6 +1540,64 @@ class TicketControlView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(AddUserModal())
+
+
+class FACAuthoriseView(discord.ui.View):
+    """Management-only action panel posted inside FAC Resetting tickets."""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Authorise FAC", style=discord.ButtonStyle.success, custom_id="fac_authorise")
+    async def authorise_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        mgmt_role = interaction.guild.get_role(CONFIG["management_role_id"])
+        if not (mgmt_role and mgmt_role in interaction.user.roles):
+            await interaction.response.send_message(
+                embed=_make_embed("Only management can authorise FAC.", 0xED4245),
+                ephemeral=True,
+            )
+            return
+
+        # Pull the ticket opener from the channel topic
+        channel = interaction.channel
+        opener_id = None
+        if channel.topic:
+            m = re.search(r'\((\d+)\)', channel.topic)
+            if m:
+                opener_id = int(m.group(1))
+
+        opener = channel.guild.get_member(opener_id) if opener_id else None
+        opener_mention = opener.mention if opener else f"<@{opener_id}>" if opener_id else "the user"
+
+        # Disable this button so it can only fire once
+        button.disabled = True
+        button.label = "FAC Authorised"
+        await interaction.message.edit(view=self)
+
+        await interaction.response.send_message(
+            embed=_make_embed(
+                f"{e('verify')} **FAC Authorised**\n\n"
+                f"{opener_mention} has been authorised to use FAC.\n\n"
+                f"**Authorised by** {interaction.user.mention} (`{interaction.user.name}`)\n\n"
+                "-# Close this ticket once you have communicated this to the user.",
+                0x57F287,
+            ),
+        )
+
+        await send_log(
+            title="FAC Authorised",
+            description=(
+                f"{opener_mention}\n"
+                f"`{opener.name if opener else opener_id}` - `{opener_id}`"
+            ),
+            color=0x57F287,
+            webhook_key="wh_tickets_opened",
+            fields=[
+                {"name": "Authorised by", "value": f"{interaction.user.mention} (`{interaction.user.name}`)", "inline": True},
+                {"name": "Channel",       "value": f"[#{channel.name}]({channel.jump_url})",                  "inline": True},
+            ],
+            footer=f"Opener ID: {opener_id}",
+        )
+        log.info("FAC authorised for %s by %s in %s", opener_id, interaction.user, channel.name)
 
 
 class SetupInvoiceModal(discord.ui.Modal, title="Enter Your Invoice ID"):
@@ -1622,6 +1692,10 @@ async def open_ticket(
         channel_name = f"{cat_info['channel_prefix']}-{ticket_num_str}"
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
+    mgmt_role  = guild.get_role(CONFIG["management_role_id"])
+
+    # FAC resetting tickets: visible to management only, not regular staff
+    is_fac = cat_id == "hwid_reset"
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -1629,11 +1703,19 @@ async def open_ticket(
             view_channel=True, send_messages=True, read_message_history=True,
         ),
     }
-    if admin_role:
-        overwrites[admin_role] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True,
-            read_message_history=True, manage_channels=True,
-        )
+    if is_fac:
+        # Only management (and owner via Discord perms) can see FAC tickets
+        if mgmt_role:
+            overwrites[mgmt_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, manage_channels=True,
+            )
+    else:
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                read_message_history=True, manage_channels=True,
+            )
 
     # Get or create the per-type Discord category on demand
     ticket_category = await _get_or_create_ticket_category(guild, cat_id)
@@ -1675,6 +1757,15 @@ async def open_ticket(
             "Do not ping staff - you will be pinged when someone is available.\n\n"
             "-# Use the buttons below to manage this ticket."
         )
+    elif is_fac:
+        text = (
+            f"## {e('chip')} FAC Resetting Ticket\n\n"
+            f"Welcome, {member.mention} (`{member.name}`) - a management member will be with you shortly.\n\n"
+            f"**User** {member.mention} (`{member.name}`) - `{member.id}`\n"
+            f"**Ticket** #{ticket_num_str} - **Opened** <t:{now_ts}:R>\n\n"
+            "Please wait for a management team member to review your request.\n\n"
+            "-# Use the buttons below to manage this ticket."
+        )
     else:
         text = (
             f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
@@ -1686,12 +1777,29 @@ async def open_ticket(
             "Include any relevant screenshots, order IDs, or error messages.\n\n"
             "-# Use the buttons below to manage this ticket."
         )
-    mention_str = admin_role.mention if admin_role else ""
+
+    # FAC tickets ping management; all others ping admin
+    if is_fac:
+        mention_str = mgmt_role.mention if mgmt_role else ""
+    else:
+        mention_str = admin_role.mention if admin_role else ""
+
     await channel.send(
         content=f"{member.mention} {mention_str}",
         embed=_make_embed(text, 0x5865F2),
         view=TicketControlView(),
     )
+
+    # FAC tickets get a second management-action message with the Authorise button
+    if is_fac:
+        await channel.send(
+            embed=_make_embed(
+                f"## {e('shield')} Management Action\n\n"
+                "Only management can authorise FAC. Click the button below once authorised.",
+                0xFEE75C,
+            ),
+            view=FACAuthoriseView(),
+        )
 
     await _reply_v2(
         interaction,
@@ -2115,6 +2223,7 @@ async def on_ready():
         log.warning("[webhooks] Some webhooks are not set. Ensure staff bot has run its startup setup and both services share the same Railway volume.")
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
+    bot.add_view(FACAuthoriseView())
     bot.add_view(VerifyView())
     bot.add_view(HWIDView())
     bot.add_view(SetupPingsView())
