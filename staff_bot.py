@@ -1391,6 +1391,45 @@ async def cmd_lookup(i: discord.Interaction, query: str):
             stamp = r["timestamp"][:16].replace("T", " ")
             lines.append(f"`{r['status']:15s}` {r['ip'] or 'N/A':>15s}  {stamp}")
         e.add_field(name="Recent Logins", value="```\n" + "\n".join(lines) + "\n```", inline=False)
+
+    # Rich event log from events table
+    event_rows = []
+    try:
+        event_rows = DB.execute(
+            "SELECT event_type, ip, geo_country, geo_city, geo_vpn, "
+            "sys_os, sys_cpu, sys_ram, sys_screen, sys_locale, sys_hostname, timestamp "
+            "FROM events WHERE discord_id=? ORDER BY id DESC LIMIT 8",
+            (did,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        pass
+
+    if event_rows:
+        ev_lines = []
+        for ev in event_rows:
+            stamp   = ev["timestamp"][:16].replace("T", " ")
+            geo_str = ""
+            if ev["geo_city"] or ev["geo_country"]:
+                geo_str = f" - {ev['geo_city'] or ''}, {ev['geo_country'] or ''}".strip(", ")
+            vpn_str = " [VPN]" if ev["geo_vpn"] else ""
+            ip_str  = f" {ev['ip']}{geo_str}{vpn_str}" if ev["ip"] else ""
+            ev_lines.append(f"`{ev['event_type']:20s}` {stamp}{ip_str}")
+        e.add_field(name=f"Event Log (last {len(event_rows)})",
+                    value="```\n" + "\n".join(ev_lines) + "\n```", inline=False)
+
+        # Show system info from the most recent event that has it
+        for ev in event_rows:
+            if ev["sys_os"]:
+                sys_parts = []
+                if ev["sys_hostname"]: sys_parts.append(f"Host: {ev['sys_hostname']}")
+                if ev["sys_os"]:       sys_parts.append(f"OS: {ev['sys_os']}")
+                if ev["sys_cpu"]:      sys_parts.append(f"CPU: {ev['sys_cpu']}")
+                if ev["sys_ram"]:      sys_parts.append(f"RAM: {ev['sys_ram']}")
+                if ev["sys_screen"]:   sys_parts.append(f"Screen: {ev['sys_screen']}")
+                if ev["sys_locale"]:   sys_parts.append(f"Locale: {ev['sys_locale']}")
+                e.add_field(name="Last Known System", value="\n".join(sys_parts), inline=False)
+                break
+
     if audit_rows:
         a_lines = [f"`{r['action']}` - {r['timestamp'][:10]}" for r in audit_rows]
         e.add_field(name="Recent Actions", value="\n".join(a_lines), inline=False)

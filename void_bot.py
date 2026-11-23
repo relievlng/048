@@ -199,6 +199,27 @@ def init_db(path: str) -> sqlite3.Connection:
             confirmed_by TEXT NOT NULL,
             notes        TEXT
         );
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id  TEXT,
+            hwid        TEXT,
+            ip          TEXT,
+            timestamp   TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            product     TEXT,
+            geo_country TEXT,
+            geo_city    TEXT,
+            geo_isp     TEXT,
+            geo_vpn     INTEGER NOT NULL DEFAULT 0,
+            sys_os      TEXT,
+            sys_build   TEXT,
+            sys_cpu     TEXT,
+            sys_ram     TEXT,
+            sys_screen  TEXT,
+            sys_locale  TEXT,
+            sys_hostname TEXT,
+            metadata    TEXT
+        );
     """)
     conn.commit()
     # Migrations - safe ALTER TABLE (ignored if column already exists)
@@ -1478,6 +1499,54 @@ async def cmd_setup(interaction: discord.Interaction):
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 
+def _geolocate(ip: str) -> dict:
+    """
+    Lookup IP geolocation using ip-api.com (free, no key needed).
+    Returns dict with country, city, isp, vpn flag. Falls back to empty dict on error.
+    """
+    if not ip or ip in ("127.0.0.1", "::1", "localhost"):
+        return {}
+    try:
+        import urllib.request
+        url = f"http://ip-api.com/json/{ip}?fields=status,country,city,isp,proxy,hosting"
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            data = json.loads(resp.read())
+        if data.get("status") != "success":
+            return {}
+        return {
+            "country": data.get("country"),
+            "city":    data.get("city"),
+            "isp":     data.get("isp"),
+            "vpn":     1 if (data.get("proxy") or data.get("hosting")) else 0,
+        }
+    except Exception:
+        return {}
+
+def _log_event(discord_id: str | None, hwid: str | None, ip: str | None,
+               event_type: str, product: str | None,
+               system: dict | None, conn: sqlite3.Connection):
+    """
+    Write a row to the events table. Runs geolocation if IP provided.
+    `system` dict keys (all optional): os, build, cpu, ram, screen, locale, hostname
+    """
+    geo = _geolocate(ip) if ip else {}
+    sys = system or {}
+    conn.execute(
+        """INSERT INTO events
+           (discord_id, hwid, ip, timestamp, event_type, product,
+            geo_country, geo_city, geo_isp, geo_vpn,
+            sys_os, sys_build, sys_cpu, sys_ram, sys_screen, sys_locale, sys_hostname,
+            metadata)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            discord_id, hwid, ip, _now_iso(), event_type, product,
+            geo.get("country"), geo.get("city"), geo.get("isp"), geo.get("vpn", 0),
+            sys.get("os"), sys.get("build"), sys.get("cpu"),
+            sys.get("ram"), sys.get("screen"), sys.get("locale"), sys.get("hostname"),
+            json.dumps(sys.get("extra")) if sys.get("extra") else None,
+        )
+    )
+
 def _api_key_ok(body: dict) -> bool:
     expected = CONFIG.get("internal_api_key", "")
     return not expected or body.get("api_key") == expected
@@ -1490,9 +1559,10 @@ def _auth_handler(body: dict) -> dict:
     Validate a cheat license key + HWID.
 
     Request fields:
-        key   (required) - the license key string
-        hwid  (required) - machine fingerprint (sha256 hex, max 128 chars)
-        ip    (optional) - client IP for logging
+        key    (required) - the license key string
+        hwid   (required) - machine fingerprint (sha256 hex, max 128 chars)
+        ip     (optional) - client IP for logging / geolocation
+        system (optional) - dict: os, build, cpu, ram, screen, locale, hostname
 
     Response on success:
         {"ok": true, "product": "...", "expires": "...|null",
@@ -1501,9 +1571,10 @@ def _auth_handler(body: dict) -> dict:
     Response on failure:
         {"ok": false, "error": "invalid_key|banned|expired|hwid_mismatch|inactive"}
     """
-    key   = (body.get("key")  or "").strip().upper()
-    hwid  = (body.get("hwid") or "").strip()[:128]
-    ip    = (body.get("ip")   or "").strip()[:64]
+    key    = (body.get("key")  or "").strip().upper()
+    hwid   = (body.get("hwid") or "").strip()[:128]
+    ip     = (body.get("ip")   or "").strip()[:64]
+    system = body.get("system") if isinstance(body.get("system"), dict) else {}
 
     if not key or not hwid:
         return {"ok": False, "error": "missing_fields"}
@@ -1556,6 +1627,7 @@ def _auth_handler(body: dict) -> dict:
                 "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
                 (did, hwid, ip, now_str, product, "expired")
             )
+            _log_event(did, hwid, ip, "auth_expired", product, system, conn)
             conn.commit()
             conn.close()
             return {"ok": False, "error": "expired"}
@@ -1573,6 +1645,7 @@ def _auth_handler(body: dict) -> dict:
                 "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
                 (did, hwid, ip, now_str, product, "hwid_mismatch")
             )
+            _log_event(did, hwid, ip, "auth_hwid_mismatch", product, system, conn)
             conn.commit()
             conn.close()
             return {"ok": False, "error": "hwid_mismatch"}
@@ -1583,25 +1656,79 @@ def _auth_handler(body: dict) -> dict:
                 (now_str, ip or None, did)
             )
 
-        # Log successful auth
+        # Log successful auth + rich event
         conn.execute(
             "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
             (did, hwid, ip, now_str, product, "ok")
         )
+        hwid_bound_now = not stored_hwid  # True if we just bound HWID for the first time
+        event_type = "auth_first_bind" if hwid_bound_now else "auth_ok"
+        _log_event(did, hwid, ip, event_type, product, system, conn)
         conn.commit()
         resets_used = user["hwid_resets"] or 0
         conn.close()
 
         return {
-            "ok":         True,
-            "product":    product,
-            "expires":    expires,
-            "discord_id": did,
+            "ok":          True,
+            "product":     product,
+            "expires":     expires,
+            "discord_id":  did,
             "resets_left": max(0, max_resets - resets_used),
+            "hwid_bound":  hwid_bound_now,
         }
 
     except Exception as ex:
         log.error("[auth] DB error: %s", ex)
+        return {"ok": False, "error": "server_error"}
+
+def _event_handler(body: dict) -> dict:
+    """
+    Log a cheat lifecycle event from the client.
+
+    Request fields:
+        key        (required) - license key (used to resolve discord_id)
+        hwid       (required) - machine fingerprint
+        event_type (required) - one of: inject, menu_open, menu_close, destruct,
+                                        fac_reset_request, custom
+        ip         (optional) - client IP
+        system     (optional) - dict: os, build, cpu, ram, screen, locale, hostname
+        note       (optional) - free-text note attached to the event
+
+    Response: {"ok": true} or {"ok": false, "error": "..."}
+    """
+    key        = (body.get("key")        or "").strip().upper()
+    hwid       = (body.get("hwid")       or "").strip()[:128]
+    event_type = (body.get("event_type") or "").strip().lower()
+    ip         = (body.get("ip")         or "").strip()[:64]
+    system     = body.get("system") if isinstance(body.get("system"), dict) else {}
+    note       = (body.get("note") or "")[:500]
+
+    ALLOWED_TYPES = {
+        "inject", "menu_open", "menu_close", "destruct",
+        "fac_reset_request", "custom",
+    }
+    if not key or not hwid or event_type not in ALLOWED_TYPES:
+        return {"ok": False, "error": "invalid_params"}
+
+    if note:
+        system = dict(system)
+        system["extra"] = {"note": note}
+
+    try:
+        conn = sqlite3.connect(CONFIG["db_path"])
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        user = conn.execute(
+            "SELECT discord_id, product FROM users WHERE key=?", (key,)
+        ).fetchone()
+        did     = user["discord_id"] if user else None
+        product = user["product"]    if user else None
+        _log_event(did, hwid, ip, event_type, product, system, conn)
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+    except Exception as ex:
+        log.error("[event] DB error: %s", ex)
         return {"ok": False, "error": "server_error"}
 
 def _verify_handler(body: dict) -> dict:
@@ -1683,6 +1810,8 @@ class _Health(BaseHTTPRequestHandler):
 
         if self.path == "/auth":
             self._send_json(_auth_handler(body))
+        elif self.path == "/event":
+            self._send_json(_event_handler(body))
         elif self.path == "/verify":
             self._send_json(_verify_handler(body))
         else:
