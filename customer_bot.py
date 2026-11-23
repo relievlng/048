@@ -87,8 +87,10 @@ CONFIG = {
     "token":                   env("DISCORD_TOKEN") or env("TOKEN"),
     "guild_id":                env_int("GUILD_ID"),
     "admin_role_id":           env_int("ADMIN_ROLE_ID"),
-    "management_role_id":      env_int("MANAGEMENT_ROLE_ID"),
-    "verified_role_id":        env_int("VERIFIED_ROLE_ID"),
+    "management_role_id":               env_int("MANAGEMENT_ROLE_ID"),
+    "resetup_needed_role_id":           env_int("RESETUP_NEEDED_ROLE_ID"),
+    "resetup_needed_payment_role_id":   env_int("RESETUP_NEEDED_PAYMENT_ROLE_ID"),
+    "verified_role_id":                 env_int("VERIFIED_ROLE_ID"),
     "setup_pings_role_id":     env_int("SETUP_PINGS_ROLE_ID"),
     "setup_alerts_channel_id": env_int("SETUP_ALERTS_CHANNEL_ID"),
     "ticket_category_id":      env_int("TICKET_CATEGORY_ID"),
@@ -1126,8 +1128,10 @@ def _ensure_tables():
         )""")
         # Migration: add columns that may be missing on existing DBs
         for _col_sql in [
-            "ALTER TABLE tickets ADD COLUMN product    TEXT",
-            "ALTER TABLE tickets ADD COLUMN expires_at TEXT",
+            "ALTER TABLE tickets ADD COLUMN product           TEXT",
+            "ALTER TABLE tickets ADD COLUMN expires_at        TEXT",
+            "ALTER TABLE tickets ADD COLUMN fac_authorised    INTEGER DEFAULT 0",
+            "ALTER TABLE tickets ADD COLUMN fac_authorised_at TEXT",
         ]:
             try:
                 conn.execute(_col_sql)
@@ -1568,15 +1572,45 @@ class FACAuthoriseView(discord.ui.View):
         opener = channel.guild.get_member(opener_id) if opener_id else None
         opener_mention = opener.mention if opener else f"<@{opener_id}>" if opener_id else "the user"
 
+        # Fetch invoice_id for this ticket from DB
+        ticket_invoice_id = None
+        with get_db() as _db:
+            _row = _db.execute(
+                "SELECT invoice_id FROM tickets WHERE channel_id = ?",
+                (str(channel.id),),
+            ).fetchone()
+            if _row:
+                ticket_invoice_id = _row["invoice_id"]
+
+        # Store FAC authorisation in the ticket row
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db() as _db:
+            _db.execute(
+                "UPDATE tickets SET fac_authorised = 1, fac_authorised_at = ? WHERE channel_id = ?",
+                (now_iso, str(channel.id)),
+            )
+            _db.commit()
+
+        # Assign Re-Setup Needed role to the opener
+        if opener:
+            resetup_role = interaction.guild.get_role(CONFIG["resetup_needed_role_id"])
+            if resetup_role:
+                try:
+                    await opener.add_roles(resetup_role, reason="FAC authorised via ticket")
+                except Exception as _ex:
+                    log.warning("Could not assign Re-Setup Needed role to %s: %s", opener_id, _ex)
+
         # Disable this button so it can only fire once
         button.disabled = True
         button.label = "FAC Authorised"
         await interaction.message.edit(view=self)
 
+        inv_line = f"**Invoice** `{ticket_invoice_id}`\n" if ticket_invoice_id else ""
         await interaction.response.send_message(
             embed=_make_embed(
                 f"{e('verify')} **FAC Authorised**\n\n"
                 f"{opener_mention} has been authorised to use FAC.\n\n"
+                f"{inv_line}"
                 f"**Authorised by** {interaction.user.mention} (`{interaction.user.name}`)\n\n"
                 "-# Close this ticket once you have communicated this to the user.",
                 0x57F287,
@@ -1593,11 +1627,12 @@ class FACAuthoriseView(discord.ui.View):
             webhook_key="wh_tickets_opened",
             fields=[
                 {"name": "Authorised by", "value": f"{interaction.user.mention} (`{interaction.user.name}`)", "inline": True},
+                {"name": "Invoice",       "value": f"`{ticket_invoice_id}`" if ticket_invoice_id else "N/A",  "inline": True},
                 {"name": "Channel",       "value": f"[#{channel.name}]({channel.jump_url})",                  "inline": True},
             ],
             footer=f"Opener ID: {opener_id}",
         )
-        log.info("FAC authorised for %s by %s in %s", opener_id, interaction.user, channel.name)
+        log.info("FAC authorised for %s (invoice=%s) by %s in %s", opener_id, ticket_invoice_id, interaction.user, channel.name)
 
 
 class SetupInvoiceModal(discord.ui.Modal, title="Enter Your Invoice ID"):
@@ -1734,7 +1769,39 @@ async def open_ticket(
         topic=topic,
     )
 
-    # --- Rich ticket open embed ---
+    # Persist the ticket to DB so FAC authorisation can be linked later
+    _opened_at_iso = datetime.now(timezone.utc).isoformat()
+    with get_db() as _db:
+        _db.execute(
+            """INSERT OR IGNORE INTO tickets
+               (ticket_num, channel_id, guild_id, discord_id, type, category, status, opened_at, invoice_id, product, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)""",
+            (
+                ticket_num_str,
+                str(channel.id),
+                str(guild.id),
+                str(member.id),
+                cat_id,
+                cat_info["label"],
+                _opened_at_iso,
+                invoice_id,
+                product,
+                expires_at,
+            ),
+        )
+        _db.commit()
+
+    # Check if this user has been FAC-authorised (shown in setup/re-setup tickets)
+    fac_authorised = False
+    if cat_id == "setup":
+        with get_db() as _db:
+            _fa = _db.execute(
+                "SELECT 1 FROM tickets WHERE discord_id = ? AND fac_authorised = 1 LIMIT 1",
+                (str(member.id),),
+            ).fetchone()
+            fac_authorised = bool(_fa)
+
+    # --- Rich ticket open embed (Components V2) ---
     now_ts = int(discord.utils.utcnow().timestamp())
     if cat_id == "setup" and invoice_id:
         # Setup ticket: show build, invoice and user identity so staff see everything
@@ -1746,12 +1813,14 @@ async def open_ticket(
                 exp_str = f"\n**Expires** <t:{exp_ts}:D>"
             except Exception:
                 exp_str = f"\n**Expires** {expires_at}"
+        fac_line = "**FAC Authorised** Yes\n" if fac_authorised else ""
         text = (
             f"## {e('description')} Setup Ticket\n\n"
             f"Welcome, {member.mention} - a setup team member will be with you shortly.\n\n"
             f"**User** {member.mention} (`{member.name}`) - `{member.id}`\n"
             f"**Build** {product or 'Unknown'}{exp_str}\n"
             f"**Invoice** `{invoice_id}`\n"
+            f"{fac_line}"
             f"**Ticket** #{ticket_num_str} - **Opened** <t:{now_ts}:R>\n\n"
             "Please wait for a setup team member. "
             "Do not ping staff - you will be pinged when someone is available.\n\n"
@@ -1784,22 +1853,37 @@ async def open_ticket(
     else:
         mention_str = admin_role.mention if admin_role else ""
 
-    await channel.send(
-        content=f"{member.mention} {mention_str}",
-        embed=_make_embed(text, 0x5865F2),
-        view=TicketControlView(),
-    )
+    # Build Components V2 ticket open message
+    _ticket_payload = dict(_v2_container([
+        {"type": 10, "content": text},
+        {"type": 14},
+        {
+            "type": 1,
+            "components": [
+                {"type": 2, "label": "Close Ticket", "style": 4, "custom_id": "ticket_close"},
+                {"type": 2, "label": "Claim",        "style": 2, "custom_id": "ticket_claim"},
+                {"type": 2, "label": "Add User",     "style": 1, "custom_id": "ticket_add_user"},
+            ],
+        },
+    ], accent=0x5865F2))
+    _ticket_payload["content"] = f"{member.mention} {mention_str}".strip()
+    await _post_channel_v2(channel, _ticket_payload)
 
     # FAC tickets get a second management-action message with the Authorise button
     if is_fac:
-        await channel.send(
-            embed=_make_embed(
+        await _post_channel_v2(channel, _v2_container([
+            {"type": 10, "content": (
                 f"## {e('shield')} Management Action\n\n"
-                "Only management can authorise FAC. Click the button below once authorised.",
-                0xFEE75C,
-            ),
-            view=FACAuthoriseView(),
-        )
+                "Only management can authorise FAC. Click the button below once authorised."
+            )},
+            {"type": 14},
+            {
+                "type": 1,
+                "components": [
+                    {"type": 2, "label": "Authorise FAC", "style": 3, "custom_id": "fac_authorise"},
+                ],
+            },
+        ], accent=0xFEE75C))
 
     await _reply_v2(
         interaction,

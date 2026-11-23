@@ -2740,6 +2740,87 @@ async def cmd_changelog(i: discord.Interaction):
     await i.response.send_modal(ChangelogModal())
 
 
+@app_commands.command(name="logs", description="[ADMIN] Show recent cheat events for a user.")
+@app_commands.describe(
+    user="Discord user (mention or ID)",
+    limit="Number of events to show (default 10, max 25)",
+    event_type="Filter by event type (inject, auth, destruct, fac_reset_request, etc.)",
+)
+@admin_only()
+async def cmd_logs(
+    i: discord.Interaction,
+    user: discord.User,
+    limit: int = 10,
+    event_type: Optional[str] = None,
+):
+    await i.response.defer(ephemeral=True)
+    limit = min(max(1, limit), 25)
+    discord_id = str(user.id)
+
+    wheres = ["discord_id = ?"]
+    params = [discord_id]
+    if event_type:
+        wheres.append("event_type = ?")
+        params.append(event_type.strip().lower())
+
+    where_sql = "WHERE " + " AND ".join(wheres)
+    rows = DB.execute(
+        f"""SELECT event_type, timestamp, ip, geo_country, geo_city, geo_vpn,
+                   sys_os, sys_hostname, metadata
+            FROM events {where_sql}
+            ORDER BY id DESC LIMIT ?""",
+        params + [limit],
+    ).fetchall()
+
+    total = DB.execute(
+        f"SELECT COUNT(*) FROM events {where_sql}", params
+    ).fetchone()[0]
+
+    if not rows:
+        await i.followup.send(
+            embed=err_embed("No Events", f"No cheat events found for {user.mention}."),
+            ephemeral=True,
+        )
+        return
+
+    # Build embed fields - one per event row
+    embed = discord.Embed(
+        title=f"Cheat Events - {user.name}",
+        description=f"Showing {len(rows)} of {total:,} total events.",
+        color=0x5865F2,
+    )
+    embed.set_thumbnail(url=str(user.display_avatar.url))
+
+    for row in rows:
+        ts_raw = row["timestamp"] or ""
+        try:
+            from datetime import datetime as _dt
+            ts_obj = _dt.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            ts_fmt = f"<t:{int(ts_obj.timestamp())}:f>"
+        except Exception:
+            ts_fmt = ts_raw
+
+        geo_parts = []
+        if row["geo_city"]:    geo_parts.append(row["geo_city"])
+        if row["geo_country"]: geo_parts.append(row["geo_country"])
+        if row["geo_vpn"]:     geo_parts.append("VPN")
+        geo = ", ".join(geo_parts) if geo_parts else (row["ip"] or "")
+
+        lines = [f"**Time** {ts_fmt}"]
+        if geo:              lines.append(f"**Geo** {geo}")
+        if row["sys_hostname"]: lines.append(f"**Host** `{row['sys_hostname']}`")
+        if row["sys_os"]:    lines.append(f"**OS** {row['sys_os']}")
+
+        embed.add_field(
+            name=f"`{row['event_type']}`",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    embed.set_footer(text=f"User ID: {user.id}")
+    await i.followup.send(embed=embed, ephemeral=True)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 ALL_COMMANDS = [
@@ -2758,6 +2839,7 @@ ALL_COMMANDS = [
     cmd_test, cmd_seed,
     cmd_pin,
     cmd_changelog,
+    cmd_logs,
 ]
 
 async def main():
