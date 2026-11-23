@@ -1866,7 +1866,12 @@ async def open_ticket(
             ],
         },
     ], accent=0x5865F2))
-    _ticket_payload["content"] = f"{member.mention} {mention_str}".strip()
+    # Components V2 forbids the legacy 'content' field. Put the ping in a
+    # top-level TextDisplay above the container; allowed_mentions makes it notify.
+    ping_line = f"{member.mention} {mention_str}".strip()
+    if ping_line:
+        _ticket_payload["components"].insert(0, {"type": 10, "content": ping_line})
+    _ticket_payload["allowed_mentions"] = {"parse": ["users", "roles"]}
     await _post_channel_v2(channel, _ticket_payload)
 
     # FAC tickets get a second management-action message with the Authorise button
