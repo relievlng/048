@@ -47,6 +47,7 @@ CONFIG = {
     "logo_url":            env("VOID_LOGO_URL",                 ""),
     "brand_name":          env("VOID_BRAND_NAME",               "Void"),
     "customer_cl_webhook":  env("VOID_CUSTOMER_CHANGELOG_WEBHOOK", ""),
+    "staff_cl_webhook":     env("VOID_STAFF_CHANGELOG_WEBHOOK",   ""),
     "db_path":              env("DB_PATH",                       "/data/keylock.db"),
     "api_port":             env_int("VOID_PORT", env_int("PORT", 8081)),
     "internal_api_key":     env("INTERNAL_API_KEY", ""),
@@ -369,32 +370,125 @@ def _emoji_obj(name: str) -> dict:
     m = re.match(r"<:(\w+):(\d+)>", val)
     return {"id": m.group(2), "name": m.group(1)} if m else {}
 
-async def _setup_emojis(guild: discord.Guild) -> None:
+async def _fetch_app_emojis(app_id: int, token: str) -> dict:
+    """Return {name: {id, name, animated}} for all current application emojis."""
+    url = f"https://discord.com/api/v10/applications/{app_id}/emojis"
+    headers = {"Authorization": f"Bot {token}"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                log.warning("Failed to fetch application emojis: %s", resp.status)
+                return {}
+            data = await resp.json()
+            # API returns {"items": [...]} for application emojis
+            items = data.get("items", data) if isinstance(data, dict) else data
+            return {e["name"]: e for e in items}
+
+
+async def _create_app_emoji(app_id: int, token: str, name: str, png_bytes: bytes) -> Optional[dict]:
+    """Upload one application emoji; return the emoji object or None on failure."""
+    import base64
+    image_data = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+    url = f"https://discord.com/api/v10/applications/{app_id}/emojis"
+    headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+    payload = {"name": name, "image": image_data}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=payload) as resp:
+            if resp.status in (200, 201):
+                return await resp.json()
+            body = await resp.text()
+            log.warning("Failed to create app emoji %s: %s %s", name, resp.status, body)
+            return None
+
+
+async def _setup_emojis() -> None:
+    """
+    Sync application emojis (bot-owned, no guild slot limit).
+    Priority: DB cache -> Discord API list -> create from SVG if missing.
+    """
+    app_id  = bot.application_id
+    token   = CONFIG["token"]
+
+    # 1. Load cached entries from DB into EMOJIS
+    if DB:
+        for row in DB.execute("SELECT name, emoji_str FROM app_emojis").fetchall():
+            # Map DB name back to EMOJIS key (key == filename == DB name)
+            for key, filename in _EMOJI_FILE_MAP.items():
+                if filename == row[0] and "EMOJI_ID" in EMOJIS.get(key, "EMOJI_ID"):
+                    EMOJIS[key] = row[1]
+
+    # 2. Determine which keys still need an emoji
+    missing = {
+        key: filename
+        for key, filename in _EMOJI_FILE_MAP.items()
+        if "EMOJI_ID" in EMOJIS.get(key, "EMOJI_ID")
+    }
+    if not missing:
+        log.info("All emojis loaded from DB cache.")
+        return
+
+    # 3. Fetch what already exists on the application
+    try:
+        existing = await _fetch_app_emojis(app_id, token)
+    except Exception as exc:
+        log.warning("Could not fetch application emojis: %s", exc)
+        existing = {}
+
+    # 4. For emojis already on the application, populate EMOJIS + cache
+    still_missing = {}
+    for key, filename in missing.items():
+        if filename in existing:
+            e   = existing[filename]
+            fmt = f"<:{e['name']}:{e['id']}>"
+            EMOJIS[key] = fmt
+            if DB:
+                DB.execute(
+                    "INSERT OR REPLACE INTO app_emojis(name, emoji_id, emoji_str, animated, synced_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (filename, str(e["id"]), fmt, int(e.get("animated", False)), _now_iso())
+                )
+                DB.commit()
+        else:
+            still_missing[key] = filename
+
+    if not still_missing:
+        log.info("All emojis synced from application emoji list.")
+        return
+
+    # 5. Create missing emojis from SVG files
     try:
         import cairosvg
     except ImportError:
-        log.warning("cairosvg not installed - skipping emoji setup")
+        log.warning("cairosvg not installed - cannot create missing emojis: %s",
+                    list(still_missing.keys()))
         return
+
     emoji_dir = os.path.join(os.path.dirname(__file__), "emojis")
     if not os.path.isdir(emoji_dir):
+        log.warning("emojis/ directory not found - skipping creation")
         return
-    existing = {e.name: e for e in await guild.fetch_emojis()}
-    for key, filename in _EMOJI_FILE_MAP.items():
+
+    for key, filename in still_missing.items():
         svg_path = os.path.join(emoji_dir, f"{filename}.svg")
         if not os.path.isfile(svg_path):
-            continue
-        if "EMOJI_ID" not in EMOJIS.get(key, "EMOJI_ID"):
+            log.warning("SVG not found for emoji key=%s file=%s", key, filename)
             continue
         try:
-            if filename in existing:
-                e = existing[filename]
-            else:
-                png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
-                e = await guild.create_custom_emoji(name=filename, image=png_bytes)
-                log.info("Created emoji :%s: (id=%s)", e.name, e.id)
-            EMOJIS[key] = f"<:{e.name}:{e.id}>"
+            png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
+            e = await _create_app_emoji(app_id, token, filename, png_bytes)
+            if e:
+                fmt = f"<:{e['name']}:{e['id']}>"
+                EMOJIS[key] = fmt
+                log.info("Created application emoji :%s: (id=%s)", e["name"], e["id"])
+                if DB:
+                    DB.execute(
+                        "INSERT OR REPLACE INTO app_emojis(name, emoji_id, emoji_str, animated, synced_at)"
+                        " VALUES(?,?,?,?,?)",
+                        (filename, str(e["id"]), fmt, int(e.get("animated", False)), _now_iso())
+                    )
+                    DB.commit()
         except Exception as exc:
-            log.warning("Emoji setup failed for %s: %s", key, exc)
+            log.warning("Emoji creation failed for %s: %s", key, exc)
 
 # ─── COMPONENTS V2 HELPERS ────────────────────────────────────────────────────
 
@@ -1285,18 +1379,57 @@ class ChangelogModal(discord.ui.Modal, title="Post Changelog"):
         removed     = (self.removed_input.value or "").strip()
 
         payload = _changelog_payload(product_ref, date, added, removed)
-        await _post_channel_v2(self._channel, payload)
 
-        wh = CONFIG.get("customer_cl_webhook", "")
+        # Post to void (staff) channel
+        void_msg_id = await _post_channel_v2(self._channel, payload)
+
+        # Post to customer Discord
+        customer_msg_id = None
+        wh_customer = CONFIG.get("customer_cl_webhook", "")
         sent_to_customer = False
-        if wh:
+        if wh_customer:
             try:
-                await _post_webhook_v2(wh, payload)
+                await _post_webhook_v2(wh_customer, payload)
                 sent_to_customer = True
             except Exception as e:
                 log.warning("Customer changelog webhook failed: %s", e)
 
-        note = " Also posted to customer Discord." if sent_to_customer else ""
+        # Post to staff Discord
+        staff_msg_id = None
+        wh_staff = CONFIG.get("staff_cl_webhook", "")
+        sent_to_staff = False
+        if wh_staff:
+            try:
+                await _post_webhook_v2(wh_staff, payload)
+                sent_to_staff = True
+            except Exception as e:
+                log.warning("Staff changelog webhook failed: %s", e)
+
+        # Persist to DB
+        if DB:
+            try:
+                DB.execute(
+                    "INSERT INTO changelogs(product, date, added, removed, posted_by, posted_at,"
+                    " void_msg_id, customer_msg_id, staff_msg_id)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        product_ref, date, added, removed,
+                        str(interaction.user.id), _now_iso(),
+                        str(void_msg_id) if void_msg_id else None,
+                        str(customer_msg_id) if customer_msg_id else None,
+                        str(staff_msg_id) if staff_msg_id else None,
+                    )
+                )
+                DB.commit()
+            except Exception as e:
+                log.warning("Failed to save changelog to DB: %s", e)
+
+        destinations = ["void channel"]
+        if sent_to_customer:
+            destinations.append("customer Discord")
+        if sent_to_staff:
+            destinations.append("staff Discord")
+        note = " Sent to: " + ", ".join(destinations) + "."
         await interaction.followup.send(f"Changelog posted.{note}", ephemeral=True)
 
 # ─── BOT SETUP ────────────────────────────────────────────────────────────────
@@ -1319,9 +1452,7 @@ async def on_ready():
     if DB is None:
         DB = init_db(CONFIG["db_path"])
     log.info("Void Bot ready: %s", bot.user)
-    guild = bot.get_guild(CONFIG["guild_id"])
-    if guild:
-        await _setup_emojis(guild)
+    await _setup_emojis()
     bot.add_view(TicketControlView())
     g = _guild_obj()
     await tree.sync(guild=g)

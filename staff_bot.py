@@ -433,7 +433,8 @@ class StaffBot(discord.Client):
         STRUCTURE = [
             {"name": "MAIN BOT LOGS",     "key": "MAIN",     "channels": [
                 "purchases","verifications","tickets-opened","tickets-closed",
-                "ticket-transcripts","ticket-notes","key-generated","bans","automod"
+                "ticket-transcripts","ticket-notes","key-generated","bans","automod",
+                "changelogs"
             ]},
             {"name": "CUSTOMER BOT LOGS", "key": "CUSTOMER", "channels": [
                 "verifications","hwid-resets",
@@ -2629,6 +2630,52 @@ async def cmd_pin(i: discord.Interaction, message_id: str, channel: Optional[dis
     await webhook_log(log_e)
 
 
+# ─── CHANGELOG VIEWER ────────────────────────────────────────────────────────
+
+@app_commands.command(name="changelogs", description="View recent changelogs posted via void_bot")
+@app_commands.describe(limit="Number of entries to show (default 5, max 20)")
+async def cmd_changelogs(i: discord.Interaction, limit: int = 5):
+    if not is_staff(i):
+        await i.response.send_message("No permission.", ephemeral=True)
+        return
+    limit = max(1, min(limit, 20))
+    await i.response.defer(ephemeral=True)
+
+    rows = DB.execute(
+        "SELECT product, date, added, removed, posted_by, posted_at"
+        " FROM changelogs ORDER BY id DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+
+    if not rows:
+        await i.followup.send(
+            embed=warn_embed("No Changelogs", "No changelogs have been posted yet."),
+            ephemeral=True,
+        )
+        return
+
+    e = discord.Embed(
+        title=f"Recent Changelogs ({len(rows)} shown)",
+        color=BRAND_COLOR,
+    )
+    for row in rows:
+        added_preview   = (row["added"][:200] + "...") if len(row["added"]) > 200 else row["added"]
+        removed_preview = ""
+        if row["removed"]:
+            removed_preview = "\n**Removed:**\n" + (
+                (row["removed"][:100] + "...") if len(row["removed"]) > 100 else row["removed"]
+            )
+        poster = f"<@{row['posted_by']}>" if row["posted_by"].isdigit() else row["posted_by"]
+        value  = f"**Added:**\n{added_preview}{removed_preview}\n-# Posted by {poster}"
+        e.add_field(
+            name=f"{row['product']} - {row['date']}",
+            value=value[:1024],
+            inline=False,
+        )
+    e.set_footer(text=f"Requested by {i.user} - {ts()}")
+    await i.followup.send(embed=e, ephemeral=True)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 ALL_COMMANDS = [
@@ -2646,6 +2693,7 @@ ALL_COMMANDS = [
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
     cmd_test, cmd_seed,
     cmd_pin,
+    cmd_changelogs,
 ]
 
 async def main():
