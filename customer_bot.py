@@ -524,6 +524,17 @@ def _ticket_panel_payload() -> dict:
             btn_emoji_name=cat["emoji_key"],
             btn_style=2,
         ))
+    # Re-Setup: for existing customers needing setup help again
+    body.append({"type": 14})
+    em_rs = _emoji_in_text("description")
+    rs_prefix = f"{em_rs} " if em_rs else ""
+    body.append(_v2_section(
+        f"{rs_prefix}**Re-Setup** - Already purchased? Open a re-setup request",
+        "Re-Setup",
+        "ticket_open_resetup",
+        btn_emoji_name="description",
+        btn_style=1,  # Primary (blue)
+    ))
     return _v2_container(body, accent=BRAND_COLOR)
 
 
