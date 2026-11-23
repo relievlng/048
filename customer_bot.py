@@ -5,7 +5,7 @@ Handles: ticket system, rules embed, verification, key lookup, HWID resets
 """
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import sqlite3
 import logging
@@ -1151,6 +1151,21 @@ def _ensure_tables():
             confirmed_by TEXT NOT NULL,
             notes        TEXT
         )""")
+        # key_deliveries: staff_bot queues keys here, this bot DMs them to members
+        conn.execute("""CREATE TABLE IF NOT EXISTS key_deliveries (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id    TEXT NOT NULL,
+            key           TEXT NOT NULL,
+            product       TEXT,
+            expires_label TEXT,
+            invoice_id    TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT,
+            created_by    TEXT,
+            created_at    TEXT NOT NULL DEFAULT '',
+            delivered_at  TEXT
+        )""")
         conn.commit()
 
 def _init_ticket_counter():
@@ -2280,6 +2295,120 @@ intents.message_content = False
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+# ─── KEY DELIVERY QUEUE ───────────────────────────────────────────────────────
+# Staff /keygen writes rows to key_deliveries. The staff bot usually does not
+# share a server with customers, so it cannot DM them. This bot lives in the
+# customer guild, so it polls the queue and delivers the key by DM.
+
+KEY_DELIVERY_MAX_ATTEMPTS = 5
+
+
+def _key_dm_embed(key: str, product: str, expires_label: str) -> discord.Embed:
+    prod_icon = "\U0001f310" if (product or "").lower() == "public" else "\U0001f512"
+    em = discord.Embed(
+        title="Your License Key",
+        description="Your key is ready. Open the loader and enter it to activate your license.",
+        color=BRAND_COLOR,
+    )
+    em.add_field(name="Key", value=f"```{key}```", inline=False)
+    em.add_field(name="Product", value=f"{prod_icon} {product or 'private'}", inline=True)
+    em.add_field(name="Valid For", value=expires_label or "Lifetime", inline=True)
+    em.set_footer(text="Keep this key private - do not share it with anyone.")
+    return em
+
+
+@tasks.loop(seconds=10)
+async def deliver_pending_keys():
+    """Poll the shared key_deliveries queue and DM each pending key from this bot."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT * FROM key_deliveries WHERE status='pending' AND attempts < ? "
+                "ORDER BY id ASC LIMIT 10",
+                (KEY_DELIVERY_MAX_ATTEMPTS,),
+            ).fetchall()
+    except Exception as ex:
+        log.warning("[delivery] queue read failed: %s", ex)
+        return
+
+    for row in rows:
+        did = str(row["discord_id"])
+        key = row["key"]
+        product = row["product"]
+        expires_label = row["expires_label"]
+        delivered = False
+        err = None
+        try:
+            user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
+            await user.send(embed=_key_dm_embed(key, product, expires_label))
+            delivered = True
+        except discord.Forbidden:
+            err = "User has DMs closed or does not share this server"
+        except discord.NotFound:
+            err = "User not found"
+        except Exception as ex:
+            err = str(ex)
+
+        now_s = datetime.now(timezone.utc).isoformat()
+        attempt_no = row["attempts"] + 1
+        with get_db() as conn:
+            if delivered:
+                conn.execute(
+                    "UPDATE key_deliveries SET status='delivered', delivered_at=?, "
+                    "attempts=?, last_error=NULL WHERE id=?",
+                    (now_s, attempt_no, row["id"]),
+                )
+            else:
+                new_status = "failed" if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS else "pending"
+                conn.execute(
+                    "UPDATE key_deliveries SET status=?, attempts=?, last_error=? WHERE id=?",
+                    (new_status, attempt_no, err, row["id"]),
+                )
+            conn.commit()
+
+        if delivered:
+            log.info("[delivery] key delivered user=%s key=%s", did, key[:12])
+            try:
+                await send_log(
+                    title="Key Delivered",
+                    description=f"<@{did}> (`{did}`) received their license key via DM.",
+                    color=0x57F287,
+                    webhook_key="wh_key_generated",
+                    fields=[
+                        {"name": "Product", "value": f"`{product or 'private'}`", "inline": True},
+                        {"name": "Valid For", "value": f"`{expires_label or 'Lifetime'}`", "inline": True},
+                    ],
+                    footer=f"User ID: {did}",
+                )
+            except Exception:
+                pass
+        else:
+            log.warning("[delivery] DM failed user=%s attempt=%d err=%s", did, attempt_no, err)
+            if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS:
+                try:
+                    await send_log(
+                        title="Key Delivery Failed",
+                        description=(
+                            f"Could not DM a license key to <@{did}> (`{did}`) after "
+                            f"{KEY_DELIVERY_MAX_ATTEMPTS} attempts."
+                        ),
+                        color=0xED4245,
+                        webhook_key="wh_key_generated",
+                        fields=[
+                            {"name": "Reason", "value": err or "Unknown", "inline": False},
+                            {"name": "Key", "value": f"`{key}`", "inline": False},
+                        ],
+                        footer=f"User ID: {did}",
+                    )
+                except Exception:
+                    pass
+
+
+@deliver_pending_keys.before_loop
+async def _before_delivery_loop():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     _ensure_tables()
@@ -2316,6 +2445,10 @@ async def on_ready():
     bot.add_view(VerifyView())
     bot.add_view(HWIDView())
     bot.add_view(SetupPingsView())
+
+    if not deliver_pending_keys.is_running():
+        deliver_pending_keys.start()
+        log.info("Key delivery queue poller started.")
 
     guild = bot.get_guild(CONFIG["guild_id"])
     if not guild:

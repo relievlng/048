@@ -141,6 +141,20 @@ def init_db(path: str) -> sqlite3.Connection:
             target_id   TEXT,
             detail      TEXT
         );
+        CREATE TABLE IF NOT EXISTS key_deliveries (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id    TEXT NOT NULL,
+            key           TEXT NOT NULL,
+            product       TEXT,
+            expires_label TEXT,
+            invoice_id    TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT,
+            created_by    TEXT,
+            created_at    TEXT NOT NULL DEFAULT '',
+            delivered_at  TEXT
+        );
     """)
     conn.commit()
     # Schema guards in case void_bot added columns staff_bot's minimal CREATE missed
@@ -1191,24 +1205,19 @@ async def cmd_keygen(i: discord.Interaction,
     prod_icon = "🌐" if prod == "public" else "🔒"
     dm_status = None
     if deliver_to:
-        dm_embed = discord.Embed(
-            title="Your License Key",
-            description="Your key is ready. Open the loader and enter it to activate your license.",
-            color=BRAND_COLOR,
+        # Queue delivery for the customer bot. The staff bot usually does not
+        # share a server with customers and cannot DM them directly, but the
+        # customer bot lives in the customer guild and polls this queue.
+        DB.execute(
+            "INSERT INTO key_deliveries "
+            "(discord_id, key, product, expires_label, invoice_id, status, created_by, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (str(deliver_to.id), k, prod, expires_label, inv, "pending", str(i.user.id), now_iso())
         )
-        dm_embed.add_field(name="Key", value=f"```{k}```", inline=False)
-        dm_embed.add_field(name="Product", value=f"{prod_icon} {prod}", inline=True)
-        dm_embed.add_field(name="Valid For", value=expires_label, inline=True)
-        dm_embed.set_footer(text="Keep this key private - do not share it with anyone.")
-        try:
-            await deliver_to.send(embed=dm_embed)
-            dm_status = f"Delivered to {deliver_to.mention}"
-            audit("KEY_DELIVERED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-                  detail=f"key={k[:20]} product={prod}")
-        except discord.Forbidden:
-            dm_status = f"DM failed - {deliver_to.mention} has DMs closed"
-        except Exception as e:
-            dm_status = f"DM failed - {e}"
+        DB.commit()
+        audit("KEY_QUEUED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+              detail=f"key={k[:20]} product={prod}")
+        dm_status = f"Queued - the customer bot will DM {deliver_to.mention} within a few seconds"
 
     linked_note = " Key linked to Discord ID." if deliver_to else " Key added to pool (unclaimed)."
     result_embed = discord.Embed(
