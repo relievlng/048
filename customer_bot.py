@@ -250,9 +250,8 @@ async def send_log(
     attachment_filename: str = None,
 ):
     """
-    Send an embed log to the appropriate staff Discord channel via webhook.
-    Uses standard Discord embed format (webhooks don't support Components v2).
-    Pass attachment_bytes + attachment_filename to upload a file alongside the embed.
+    Send a Components V2 log to the appropriate staff Discord channel via webhook.
+    Pass attachment_bytes + attachment_filename to upload a file alongside the message.
     """
     _refresh_webhook_config()
     url = CONFIG.get(webhook_key) or CONFIG.get("log_webhook_url")
@@ -260,51 +259,76 @@ async def send_log(
         log.warning("send_log: no webhook URL for key=%s - check webhooks.env or staff bot /setup", webhook_key)
         return
 
-    embed: dict = {
-        "title": title,
-        "description": description,
-        "color": color,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    if fields:
-        embed["fields"] = [
-            {"name": f["name"], "value": f["value"], "inline": f.get("inline", False)}
-            for f in fields
-        ]
-    if thumbnail_url:
-        embed["thumbnail"] = {"url": thumbnail_url}
-    if footer:
-        embed["footer"] = {"text": footer}
+    now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
 
-    payload = {"embeds": [embed]}
+    # Build Components V2 body
+    comps: list = []
+
+    # Header row: title + optional thumbnail as section accessory
+    if thumbnail_url:
+        comps.append({
+            "type": 9,
+            "components": [{"type": 10, "content": f"### {title}"}],
+            "accessory": {"type": 11, "media": {"url": thumbnail_url}},
+        })
+    else:
+        comps.append({"type": 10, "content": f"### {title}"})
+
+    comps.append({"type": 14, "divider": True, "spacing": 1})
+
+    # Description
+    if description:
+        comps.append({"type": 10, "content": description})
+
+    # Fields - group inline fields on same line, block fields on own line
+    if fields:
+        comps.append({"type": 14, "divider": False, "spacing": 1})
+        inline_buf: list = []
+        for f in fields:
+            chunk = f"`{f['name']}` {f['value']}"
+            if f.get("inline"):
+                inline_buf.append(chunk)
+                if len(inline_buf) >= 3:
+                    comps.append({"type": 10, "content": " • ".join(inline_buf)})
+                    inline_buf = []
+            else:
+                if inline_buf:
+                    comps.append({"type": 10, "content": " • ".join(inline_buf)})
+                    inline_buf = []
+                comps.append({"type": 10, "content": f"**{f['name']}**\n{f['value']}"})
+        if inline_buf:
+            comps.append({"type": 10, "content": " • ".join(inline_buf)})
+
+    # Footer + timestamp
+    footer_parts = []
+    if footer:
+        footer_parts.append(footer)
+    footer_parts.append(now_str)
+    comps.append({"type": 14, "divider": False, "spacing": 1})
+    comps.append({"type": 10, "content": f"-# {' • '.join(footer_parts)}"})
+
+    payload = {
+        "flags": 1 << 15,
+        "components": [{"type": 17, "accent_color": color, "components": comps}],
+    }
 
     try:
         async with aiohttp.ClientSession() as session:
             if attachment_bytes and attachment_filename:
-                # Multipart: embed JSON + file attachment in one request
                 form = aiohttp.FormData()
-                form.add_field(
-                    "payload_json",
-                    json.dumps(payload),
-                    content_type="application/json",
-                )
+                form.add_field("payload_json", json.dumps(payload), content_type="application/json")
                 ext = attachment_filename.rsplit(".", 1)[-1].lower()
                 mime = "text/html" if ext == "html" else "text/plain"
-                form.add_field(
-                    "files[0]",
-                    attachment_bytes,
-                    filename=attachment_filename,
-                    content_type=mime,
-                )
+                form.add_field("files[0]", attachment_bytes, filename=attachment_filename, content_type=mime)
                 async with session.post(url, data=form) as resp:
                     if resp.status not in (200, 204):
-                        body = await resp.text()
-                        log.warning("send_log(+file) webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
+                        raw = await resp.text()
+                        log.warning("send_log(+file) webhook %s returned %d: %s", webhook_key, resp.status, raw[:200])
             else:
                 async with session.post(url, json=payload) as resp:
                     if resp.status not in (200, 204):
-                        body = await resp.text()
-                        log.warning("send_log webhook %s returned %d: %s", webhook_key, resp.status, body[:200])
+                        raw = await resp.text()
+                        log.warning("send_log webhook %s returned %d: %s", webhook_key, resp.status, raw[:200])
     except Exception as exc:
         log.warning("send_log failed for key=%s: %s", webhook_key, exc)
 
@@ -1424,6 +1448,15 @@ class TicketPanelView(discord.ui.View):
             btn.callback = self._make_callback(cat_id)
             self.add_item(btn)
 
+        # Re-Setup button: for existing customers needing setup help again
+        resetup_btn = discord.ui.Button(
+            label="Re-Setup",
+            style=discord.ButtonStyle.primary,
+            custom_id="ticket_open_resetup",
+        )
+        resetup_btn.callback = self._resetup_callback
+        self.add_item(resetup_btn)
+
     def _make_callback(self, cat_id: str):
         async def callback(interaction: discord.Interaction):
             if cat_id == "setup":
@@ -1432,6 +1465,10 @@ class TicketPanelView(discord.ui.View):
             else:
                 await open_ticket(interaction, cat_id)
         return callback
+
+    async def _resetup_callback(self, interaction: discord.Interaction):
+        """Re-Setup ticket - validates invoice like setup, creates a setup ticket."""
+        await interaction.response.send_modal(SetupInvoiceModal())
 
 
 class TicketControlView(discord.ui.View):
@@ -1609,7 +1646,7 @@ async def open_ticket(
     # --- Rich ticket open embed ---
     now_ts = int(discord.utils.utcnow().timestamp())
     if cat_id == "setup" and invoice_id:
-        # Setup ticket: show build and invoice so staff see it immediately
+        # Setup ticket: show build, invoice and user identity so staff see everything
         exp_str = ""
         if expires_at:
             try:
@@ -1620,23 +1657,23 @@ async def open_ticket(
                 exp_str = f"\n**Expires** {expires_at}"
         text = (
             f"## {e('description')} Setup Ticket\n\n"
-            f"Welcome, {member.mention}. A setup team member will be with you shortly.\n\n"
+            f"Welcome, {member.mention} - a setup team member will be with you shortly.\n\n"
+            f"**User** {member.mention} (`{member.name}`) - `{member.id}`\n"
             f"**Build** {product or 'Unknown'}{exp_str}\n"
             f"**Invoice** `{invoice_id}`\n"
-            f"**Ticket** #{ticket_num_str}\n"
-            f"**Opened** <t:{now_ts}:R>\n\n"
-            "Please wait for a setup team member to assist you. "
+            f"**Ticket** #{ticket_num_str} - **Opened** <t:{now_ts}:R>\n\n"
+            "Please wait for a setup team member. "
             "Do not ping staff - you will be pinged when someone is available.\n\n"
             "-# Use the buttons below to manage this ticket."
         )
     else:
         text = (
             f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
-            f"Welcome, {member.mention}. A staff member will be with you shortly.\n\n"
+            f"Welcome, {member.mention} (`{member.name}`) - a staff member will be with you shortly.\n\n"
+            f"**User** `{member.name}` - `{member.id}`\n"
             f"**Category** {cat_info['desc']}\n"
-            f"**Ticket** #{ticket_num_str}\n"
-            f"**Opened** <t:{now_ts}:R>\n\n"
-            "Please describe your issue in as much detail as possible. "
+            f"**Ticket** #{ticket_num_str} - **Opened** <t:{now_ts}:R>\n\n"
+            "Please describe your issue in detail. "
             "Include any relevant screenshots, order IDs, or error messages.\n\n"
             "-# Use the buttons below to manage this ticket."
         )

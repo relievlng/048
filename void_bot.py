@@ -1205,10 +1205,10 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
         )
         DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (key,))
 
-        # Stamp ticket
+        # Stamp ticket (include product so /verify returns it correctly)
         DB.execute(
-            "UPDATE tickets SET invoice_id=?, paid_at=?, payment_status='confirmed' WHERE channel_id=?",
-            (invoice_id, now_iso(), str(channel.id)),
+            "UPDATE tickets SET invoice_id=?, paid_at=?, payment_status='confirmed', product=? WHERE channel_id=?",
+            (invoice_id, now_iso(), prod, str(channel.id)),
         )
 
         # Write clean payment record (queryable from staff server)
@@ -1649,19 +1649,18 @@ def _webhook_post_sync(url: str, payload: dict) -> None:
 
 
 def _build_event_embed(discord_id, hwid, ip, event_type, product, system, geo, note) -> dict:
-    """Build a Discord embed dict for a cheat event."""
-    cfg       = _EVENT_WEBHOOK_MAP.get(event_type, ("webhook_loader_events", 0x99AAB5, event_type.upper(), "description"))
-    label     = cfg[2]
-    color     = cfg[1]
-    em_key    = cfg[3] if len(cfg) > 3 else "description"
-    em_str    = _emoji_in_text(em_key)   # "<:name:id>" or "" if not loaded yet
-    em_prefix = f"{em_str} " if em_str else ""
+    """Build a Components V2 message dict for a cheat event."""
+    cfg      = _EVENT_WEBHOOK_MAP.get(event_type, ("webhook_loader_events", 0x99AAB5, event_type.upper(), "description"))
+    label    = cfg[2]
+    color    = cfg[1]
+    em_key   = cfg[3] if len(cfg) > 3 else "description"
+    em_str   = _emoji_in_text(em_key)
+    em_pfx   = f"{em_str} " if em_str else ""
 
-    sys = system or {}
-    extra = sys.get("extra") or {}
-    note_str = note or extra.get("note", "")
+    sys_d    = system or {}
+    extra    = sys_d.get("extra") or {}
+    note_str = note or (extra.get("note", "") if isinstance(extra, dict) else "")
 
-    # Location line
     loc_parts = []
     if geo.get("country"):
         loc_parts.append(geo["country"])
@@ -1671,40 +1670,56 @@ def _build_event_embed(discord_id, hwid, ip, event_type, product, system, geo, n
     if geo.get("vpn"):
         loc += " [VPN/Proxy]"
 
-    fields = []
-    if discord_id:
-        fields.append({"name": "User", "value": f"<@{discord_id}> (`{discord_id}`)", "inline": True})
-    if product:
-        fields.append({"name": "Product", "value": product, "inline": True})
-    if hwid:
-        fields.append({"name": "HWID", "value": f"`{hwid[:20]}...`", "inline": True})
-    if ip:
-        fields.append({"name": "IP", "value": f"`{ip}`", "inline": True})
-    fields.append({"name": "Location", "value": loc, "inline": True})
-    if geo.get("isp"):
-        fields.append({"name": "ISP", "value": geo["isp"][:50], "inline": True})
+    now_str = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M UTC")
+    comps: list = []
 
+    # Title
+    comps.append({"type": 10, "content": f"### {em_pfx}[{label}]"})
+    comps.append({"type": 14, "divider": True, "spacing": 1})
+
+    # Identity block
+    id_lines = []
+    if discord_id:
+        id_lines.append(f"**User** <@{discord_id}> (`{discord_id}`)")
+    if product:
+        id_lines.append(f"**Product** {product}")
+    if id_lines:
+        comps.append({"type": 10, "content": "\n".join(id_lines)})
+
+    # Network block
+    net_lines = []
+    if hwid:
+        net_lines.append(f"**HWID** `{hwid[:24]}...`")
+    if ip:
+        net_lines.append(f"**IP** `{ip}`")
+    net_lines.append(f"**Location** {loc}")
+    if geo.get("isp"):
+        net_lines.append(f"**ISP** {geo['isp'][:50]}")
+    comps.append({"type": 10, "content": "\n".join(net_lines)})
+
+    # System block
     sys_parts = []
-    if sys.get("os"):
-        sys_parts.append(sys["os"])
-    if sys.get("cpu"):
-        sys_parts.append(sys["cpu"][:40])
-    if sys.get("ram"):
-        sys_parts.append(sys["ram"])
-    if sys.get("screen"):
-        sys_parts.append(sys["screen"])
+    if sys_d.get("os"):
+        sys_parts.append(sys_d["os"])
+    if sys_d.get("cpu"):
+        sys_parts.append(sys_d["cpu"][:40])
+    if sys_d.get("ram"):
+        sys_parts.append(sys_d["ram"])
+    if sys_d.get("screen"):
+        sys_parts.append(sys_d["screen"])
     if sys_parts:
-        fields.append({"name": "System", "value": "\n".join(sys_parts), "inline": False})
+        comps.append({"type": 14, "divider": False, "spacing": 1})
+        comps.append({"type": 10, "content": f"**System** {' | '.join(sys_parts)}"})
+
     if note_str:
-        fields.append({"name": "Note", "value": note_str[:500], "inline": False})
+        comps.append({"type": 10, "content": f"**Note** {note_str[:500]}"})
+
+    comps.append({"type": 14, "divider": False, "spacing": 1})
+    comps.append({"type": 10, "content": f"-# {now_str}"})
 
     return {
-        "embeds": [{
-            "title":     f"{em_prefix}[{label}]",
-            "color":     color,
-            "fields":    fields,
-            "timestamp": _now_iso(),
-        }]
+        "flags": 1 << 15,
+        "components": [{"type": 17, "accent_color": color, "components": comps}],
     }
 
 
