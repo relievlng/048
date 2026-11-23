@@ -258,6 +258,124 @@ TICKET_LABELS = {
     "general":    "General Support",
 }
 
+# ─── DISCORD COMPONENT V2 HELPERS ─────────────────────────────────────────────
+
+FLAGS_CV2 = 1 << 15  # IS_COMPONENTS_V2 message flag
+
+def _sv2_container(body: list, accent: int = 0xFF69B4) -> dict:
+    """Wrap body components in a V2 container."""
+    return {
+        "flags": FLAGS_CV2,
+        "components": [{"type": 17, "accent_color": accent, "components": body}],
+    }
+
+def _sv2_text(content: str) -> dict:
+    return {"type": 10, "content": content}
+
+def _sv2_sep(divider: bool = True, spacing: int = 1) -> dict:
+    return {"type": 14, "divider": divider, "spacing": spacing}
+
+def _sv2_section(text: str, btn_label: str, btn_custom_id: str, btn_style: int = 2) -> dict:
+    return {
+        "type": 9,
+        "components": [_sv2_text(text)],
+        "accessory": {
+            "type": 2,
+            "style": btn_style,
+            "label": btn_label,
+            "custom_id": btn_custom_id,
+        },
+    }
+
+async def _staff_post_v2(channel: discord.TextChannel, payload: dict) -> int | None:
+    """POST a V2 component message to a channel and return the message ID."""
+    async with aiohttp.ClientSession() as session:
+        url = f"https://discord.com/api/v10/channels/{channel.id}/messages"
+        headers = {
+            "Authorization": f"Bot {CONFIG['token']}",
+            "Content-Type": "application/json",
+        }
+        async with session.post(url, json=payload, headers=headers) as resp:
+            if resp.status in (200, 201):
+                data = await resp.json()
+                return int(data["id"])
+            text = await resp.text()
+            log.error("[v2_post] %s %s", resp.status, text)
+            return None
+
+def _build_infoboard_payload() -> dict:
+    """Build the staff info/command reference panel as a V2 component payload."""
+    accent = 0xFF69B4  # Staff pink
+    body: list = []
+
+    # Header
+    body.append(_sv2_text(
+        "# 048 Staff Panel\n"
+        "-# Internal command reference and system overview."
+    ))
+    body.append(_sv2_sep())
+
+    # Ticket management
+    body.append(_sv2_text(
+        "## Ticket Management\n"
+        "- `/panel [channel]` - Post the ticket creation panel to a channel\n"
+        "- `/tickets [status]` - List tickets by status (open / approved / closed)\n"
+        "- `/ticketlookup <user>` - Full ticket + license summary for a user\n"
+        "- `/addnote <user> <note>` - Attach a note to a user's license record\n"
+        "-# Ticket types: HWID Reset (Free/Paid) - FAC Auth (Free/Paid) - General"
+    ))
+    body.append(_sv2_sep())
+
+    # User / license management
+    body.append(_sv2_text(
+        "## User Management\n"
+        "- `/lookup <user>` - Full user record across all bots\n"
+        "- `/ban <user> [reason]` - Ban a user from the service\n"
+        "- `/unban <user>` - Remove a service ban\n"
+        "- `/revoke <user>` - Revoke a user's license key\n"
+        "- `/resethwid <user>` - Manually reset HWID binding\n"
+        "- `/hwid <user>` - View current HWID for a user\n"
+        "- `/extend <user> <days>` - Extend license expiry by N days\n"
+        "- `/setproduct <user> <product>` - Change a user's product tier\n"
+        "- `/grantresets <user> <count>` - Grant extra HWID reset credits\n"
+        "- `/wipeuser <user>` - Permanently wipe all data for a user"
+    ))
+    body.append(_sv2_sep())
+
+    # Key management
+    body.append(_sv2_text(
+        "## Key Management\n"
+        "- `/keygen <product> <days> [count]` - Generate one or more license keys\n"
+        "- `/listkeys [product]` - List keys in the pool (unused)\n"
+        "- `/deletekey <key>` - Remove a key from the pool\n"
+        "- `/listusers [product]` - List all registered users\n"
+        "- `/purgeexpired` - Remove all expired license records"
+    ))
+    body.append(_sv2_sep())
+
+    # System commands
+    body.append(_sv2_text(
+        "## System Commands\n"
+        "- `/stats` - Live DB snapshot: users, keys, tickets, logins\n"
+        "- `/auditlog [count]` - View recent staff audit log entries\n"
+        "- `/announce <channel> <message>` - Broadcast a message to a channel\n"
+        "- `/register <user> <key>` - Manually register a user to a key\n"
+        "- `/mystatus` - Check your own license status\n"
+        "- `/fac <user>` - View or manage FAC auth state\n"
+        "- `/pin <message_id>` - Pin a message in the current channel\n"
+        "- `/invite` - Get a bot invite link"
+    ))
+    body.append(_sv2_sep())
+
+    # Notes footer
+    body.append(_sv2_text(
+        "-# All commands require the Staff role.\n"
+        "-# Lookup and ban commands search across all Discord servers the bot is in.\n"
+        "-# Ticket transcripts and audit logs are stored in the shared database."
+    ))
+
+    return _sv2_container(body, accent=accent)
+
 # ─── WEBHOOK LOG (cross-bot to main server) ───────────────────────────────────
 
 async def webhook_log(embed: discord.Embed):
@@ -1145,16 +1263,30 @@ async def cmd_lookup(i: discord.Interaction, query: str):
         "SELECT action, timestamp FROM audit_log WHERE target_id=? ORDER BY id DESC LIMIT 5", (did,)
     ).fetchall()
 
-    try:
-        member = await i.guild.fetch_member(int(did))
+    # Try to find member across staff, main, and customer guilds
+    member = None
+    member_guild_name = None
+    for guild_id in filter(None, [i.guild.id, CONFIG.get("main_guild_id"), CONFIG.get("void_guild_id")]):
+        g = bot.get_guild(guild_id) or i.guild
+        try:
+            m = g.get_member(int(did)) or await g.fetch_member(int(did))
+            if m:
+                member = m
+                member_guild_name = g.name
+                break
+        except Exception:
+            continue
+
+    if member:
         disc_str = f"<@{did}> (`{member}` / `{did}`)"
         joined = member.joined_at.strftime("%Y-%m-%d") if member.joined_at else "Unknown"
+        joined += f" - {member_guild_name}" if member_guild_name and member_guild_name != i.guild.name else ""
         created = member.created_at.strftime("%Y-%m-%d")
         roles_str = ", ".join(r.name for r in member.roles if r.name != "@everyone") or "None"
         avatar_url = member.display_avatar.url
-    except Exception:
+    else:
         disc_str = f"<@{did}> (`{did}`)"
-        joined = "Not in server"
+        joined = "Not found in any linked server"
         created = "Unknown"
         roles_str = "N/A"
         avatar_url = None
@@ -2261,6 +2393,26 @@ async def cmd_panel(i: discord.Interaction, channel: Optional[discord.TextChanne
     await i.followup.send(embed=ok_embed("Panel Posted", f"Panel sent to {target.mention}."), ephemeral=True)
 
 
+@app_commands.command(name="infoboard", description="[STAFF] Post the staff command reference panel.")
+@app_commands.describe(channel="Channel to post the infoboard in (defaults to current)")
+@staff_only()
+async def cmd_infoboard(i: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+    await i.response.defer(ephemeral=True)
+    target = channel or i.channel
+    payload = _build_infoboard_payload()
+    msg_id = await _staff_post_v2(target, payload)
+    if msg_id:
+        await i.followup.send(
+            embed=ok_embed("Infoboard Posted", f"Staff reference panel sent to {target.mention}."),
+            ephemeral=True,
+        )
+    else:
+        await i.followup.send(
+            embed=err_embed("Post Failed", "Could not post the infoboard. Check bot permissions."),
+            ephemeral=True,
+        )
+
+
 @app_commands.command(name="ticketlookup", description="[STAFF] Look up a user's license info from the main bot DB.")
 @app_commands.describe(query="@mention or Discord ID")
 @staff_only()
@@ -2421,7 +2573,7 @@ async def cmd_pin(i: discord.Interaction, message_id: str, channel: Optional[dis
 
 ALL_COMMANDS = [
     # ticket commands
-    cmd_panel, cmd_ticketlookup, cmd_tickets, cmd_addnote_staff,
+    cmd_panel, cmd_infoboard, cmd_ticketlookup, cmd_tickets, cmd_addnote_staff,
     # user commands (from main bot)
     cmd_register, cmd_mystatus,
     # admin commands (ported from main bot)
