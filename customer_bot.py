@@ -1393,7 +1393,11 @@ class TicketPanelView(discord.ui.View):
 
     def _make_callback(self, cat_id: str):
         async def callback(interaction: discord.Interaction):
-            await open_ticket(interaction, cat_id)
+            if cat_id == "setup":
+                # Show invoice modal first - validates purchase and pulls build info
+                await interaction.response.send_modal(SetupInvoiceModal())
+            else:
+                await open_ticket(interaction, cat_id)
         return callback
 
 
@@ -1447,7 +1451,69 @@ class TicketControlView(discord.ui.View):
         await interaction.response.send_modal(AddUserModal())
 
 
-async def open_ticket(interaction: discord.Interaction, cat_id: str):
+class SetupInvoiceModal(discord.ui.Modal, title="Enter Your Invoice ID"):
+    """Shown when a user opens a setup ticket - validates invoice and pulls build info."""
+    invoice_input = discord.ui.TextInput(
+        label="Invoice ID",
+        placeholder="e.g. INV-XXXX-XXXX-XXXX-XXXX",
+        min_length=5,
+        max_length=40,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        invoice_id = self.invoice_input.value.strip().upper()
+        member     = interaction.user
+
+        product    = None
+        expires_at = None
+        try:
+            with get_db() as conn:
+                # Check payments first (staff_bot confirmed purchases)
+                row = conn.execute(
+                    "SELECT product, expires_at FROM payments WHERE invoice_id=?",
+                    (invoice_id,)
+                ).fetchone()
+                # Fallback to tickets (void_bot confirmed purchases)
+                if not row:
+                    row = conn.execute(
+                        "SELECT product, expires_at FROM tickets WHERE invoice_id=?",
+                        (invoice_id,)
+                    ).fetchone()
+                if row:
+                    product    = row["product"]
+                    expires_at = row["expires_at"]
+        except Exception as ex:
+            log.error("Setup invoice lookup failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
+            await interaction.followup.send(
+                "Database error. Contact staff.", ephemeral=True
+            )
+            return
+
+        if not row:
+            await interaction.followup.send(
+                "Invoice ID not found. Make sure your purchase has been confirmed by staff. "
+                "Contact staff if you believe this is wrong.",
+                ephemeral=True,
+            )
+            return
+
+        await open_ticket(
+            interaction, "setup",
+            invoice_id=invoice_id,
+            product=product,
+            expires_at=expires_at,
+        )
+
+
+async def open_ticket(
+    interaction: discord.Interaction,
+    cat_id: str,
+    *,
+    invoice_id: Optional[str] = None,
+    product:    Optional[str] = None,
+    expires_at: Optional[str] = None,
+):
     guild  = interaction.guild
     member = interaction.user
     cat_info = TICKET_CATEGORIES[cat_id]
@@ -1471,8 +1537,16 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
     ticket_num = get_next_ticket_number()
     ticket_num_str = str(ticket_num).zfill(4)
 
-    # Build a clean channel name: {prefix}-{ticket_num}
-    channel_name = f"{cat_info['channel_prefix']}-{ticket_num_str}"
+    # Setup tickets: name includes username + build so staff can see at a glance
+    if cat_id == "setup" and product:
+        # Clean product to slug: lowercase, spaces -> hyphens, max 16 chars
+        prod_slug = re.sub(r"[^a-z0-9-]", "", product.lower().replace(" ", "-"))[:16]
+        # Clean username: lowercase, strip special chars, max 12 chars
+        uname_slug = re.sub(r"[^a-z0-9]", "", member.name.lower())[:12]
+        channel_name = f"setup-{uname_slug}-{prod_slug}" if prod_slug else f"setup-{uname_slug}-{ticket_num_str}"
+    else:
+        # Build a clean channel name: {prefix}-{ticket_num}
+        channel_name = f"{cat_info['channel_prefix']}-{ticket_num_str}"
 
     admin_role = guild.get_role(CONFIG["admin_role_id"])
 
@@ -1507,16 +1581,38 @@ async def open_ticket(interaction: discord.Interaction, cat_id: str):
 
     # --- Rich ticket open embed ---
     now_ts = int(discord.utils.utcnow().timestamp())
-    text = (
-        f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
-        f"Welcome, {member.mention}. A staff member will be with you shortly.\n\n"
-        f"**Category** {cat_info['desc']}\n"
-        f"**Ticket** #{ticket_num_str}\n"
-        f"**Opened** <t:{now_ts}:R>\n\n"
-        "Please describe your issue in as much detail as possible. "
-        "Include any relevant screenshots, order IDs, or error messages.\n\n"
-        "-# Use the buttons below to manage this ticket."
-    )
+    if cat_id == "setup" and invoice_id:
+        # Setup ticket: show build and invoice so staff see it immediately
+        exp_str = ""
+        if expires_at:
+            try:
+                from datetime import datetime as _dt
+                exp_ts = int(_dt.fromisoformat(expires_at).timestamp())
+                exp_str = f"\n**Expires** <t:{exp_ts}:D>"
+            except Exception:
+                exp_str = f"\n**Expires** {expires_at}"
+        text = (
+            f"## {e('description')} Setup Ticket\n\n"
+            f"Welcome, {member.mention}. A setup team member will be with you shortly.\n\n"
+            f"**Build** {product or 'Unknown'}{exp_str}\n"
+            f"**Invoice** `{invoice_id}`\n"
+            f"**Ticket** #{ticket_num_str}\n"
+            f"**Opened** <t:{now_ts}:R>\n\n"
+            "Please wait for a setup team member to assist you. "
+            "Do not ping staff - you will be pinged when someone is available.\n\n"
+            "-# Use the buttons below to manage this ticket."
+        )
+    else:
+        text = (
+            f"## {e('ticket')} {cat_info['label']} Ticket\n\n"
+            f"Welcome, {member.mention}. A staff member will be with you shortly.\n\n"
+            f"**Category** {cat_info['desc']}\n"
+            f"**Ticket** #{ticket_num_str}\n"
+            f"**Opened** <t:{now_ts}:R>\n\n"
+            "Please describe your issue in as much detail as possible. "
+            "Include any relevant screenshots, order IDs, or error messages.\n\n"
+            "-# Use the buttons below to manage this ticket."
+        )
     mention_str = admin_role.mention if admin_role else ""
     await channel.send(
         content=f"{member.mention} {mention_str}",
