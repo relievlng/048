@@ -1055,6 +1055,20 @@ def _ensure_tables():
             transcript      TEXT,
             notes           TEXT
         )""")
+        # payments table is owned by staff_bot; create here as safety net for shared DB
+        conn.execute("""CREATE TABLE IF NOT EXISTS payments (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id   TEXT UNIQUE NOT NULL,
+            discord_id   TEXT NOT NULL,
+            key          TEXT NOT NULL,
+            product      TEXT NOT NULL,
+            amount       TEXT,
+            method       TEXT,
+            expires_at   TEXT,
+            paid_at      TEXT NOT NULL,
+            confirmed_by TEXT NOT NULL,
+            notes        TEXT
+        )""")
         conn.commit()
 
 def _init_ticket_counter():
@@ -1749,12 +1763,19 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         guild      = interaction.guild
 
         # Direct DB lookup - no HTTP call needed (shared volume with void_bot)
+        # tickets: written by void_bot when payment confirmed via void server
+        # payments: written by staff_bot when payment confirmed via staff server
         try:
             with get_db() as conn:
                 ticket = conn.execute(
                     "SELECT discord_id FROM tickets WHERE invoice_id=?",
                     (invoice_id,)
                 ).fetchone()
+                if not ticket:
+                    ticket = conn.execute(
+                        "SELECT discord_id FROM payments WHERE invoice_id=?",
+                        (invoice_id,)
+                    ).fetchone()
         except Exception as ex:
             log.error("Verify DB lookup failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
             await interaction.followup.send(
