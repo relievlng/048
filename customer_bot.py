@@ -836,8 +836,8 @@ async def _get_or_create_ticket_category(guild: discord.Guild, cat_id: str) -> d
                 send_messages=True, read_message_history=True,
             )
 
-    base_cat = guild.get_channel(CONFIG.get("ticket_category_id") or 0)
-    position = (base_cat.position + 1) if base_cat else 0
+    # Place new ticket category at the bottom of the server
+    position = max((c.position for c in guild.categories), default=0) + 1
 
     try:
         new_cat = await guild.create_category(
