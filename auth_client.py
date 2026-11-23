@@ -1,10 +1,10 @@
 """
-048 Auth Client - drop this file into your cheat project.
+Void Bypass Auth Client - drop this file into your cheat project.
 
 Usage:
-    from auth_client import Client048
+    from auth_client import VoidBypassClient
 
-    client = Client048(
+    client = VoidBypassClient(
         base_url = "https://your-service.railway.app",
         api_key  = "your_internal_api_key",   # matches INTERNAL_API_KEY env var on Railway
     )
@@ -184,7 +184,7 @@ _ERROR_MESSAGES = {
 }
 
 
-class Client048:
+class VoidBypassClient:
     """
     Drop-in auth + event client for 048.
 
