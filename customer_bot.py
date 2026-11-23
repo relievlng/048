@@ -530,8 +530,8 @@ def _ticket_panel_payload() -> dict:
                 f"{rs_prefix}**Re-Setup** - Already set up? Open a re-setup request",
                 "Re-Setup",
                 "ticket_open_resetup",
-                btn_emoji_name=None,
-                btn_style=1,  # Primary blue
+                btn_emoji_name="verify",
+                btn_style=2,  # Match other buttons
             ))
     return _v2_container(body, accent=BRAND_COLOR)
 
