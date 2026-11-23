@@ -954,7 +954,7 @@ _EMOJI_FILE_MAP = {
     "shield":      "shield",
     "arrow":       "arrow",
     "warn":        "triangle",
-    "dot":         "dot",
+    "dot":         "dotblue",
     "bell":        "bell",
     "lock":        "lock",
     "gear":        "gear",
