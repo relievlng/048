@@ -124,24 +124,47 @@ CONFIG = {
 # <:name:id> strings here. Until then the fallback Unicode chars show fine.
 
 EMOJIS = {
-    "verify":  env("EMOJI_VERIFY",  "<:verify:EMOJI_ID>"),
-    "key":     env("EMOJI_KEY",     "<:key:EMOJI_ID>"),
-    "chip":    env("EMOJI_CHIP",    "<:chip:EMOJI_ID>"),
-    "ticket":  env("EMOJI_TICKET",  "<:ticket:EMOJI_ID>"),
-    "rules":   env("EMOJI_RULES",   "<:rules:EMOJI_ID>"),
-    "cross":   env("EMOJI_CROSS",   "<:cross:EMOJI_ID>"),
-    "shield":  env("EMOJI_SHIELD",  "<:shield:EMOJI_ID>"),
-    "arrow":   env("EMOJI_ARROW",   "<:arrow:EMOJI_ID>"),
-    "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
-    "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
-    "bell":    env("EMOJI_BELL",    "<:bell:EMOJI_ID>"),
-    "lock":    env("EMOJI_LOCK",    "<:lock:EMOJI_ID>"),
-    "gear":    env("EMOJI_GEAR",    "<:gear:EMOJI_ID>"),
+    # --- original keys ---
+    "verify":      env("EMOJI_VERIFY",      "<:verify:EMOJI_ID>"),
+    "key":         env("EMOJI_KEY",         "<:key:EMOJI_ID>"),
+    "chip":        env("EMOJI_CHIP",        "<:chip:EMOJI_ID>"),
+    "ticket":      env("EMOJI_TICKET",      "<:ticket:EMOJI_ID>"),
+    "rules":       env("EMOJI_RULES",       "<:rules:EMOJI_ID>"),
+    "cross":       env("EMOJI_CROSS",       "<:cross:EMOJI_ID>"),
+    "shield":      env("EMOJI_SHIELD",      "<:shield:EMOJI_ID>"),
+    "arrow":       env("EMOJI_ARROW",       "<:arrow:EMOJI_ID>"),
+    "warn":        env("EMOJI_WARN",        "<:warn:EMOJI_ID>"),
+    "dot":         env("EMOJI_DOT",         "<:dot:EMOJI_ID>"),
+    "bell":        env("EMOJI_BELL",        "<:bell:EMOJI_ID>"),
+    "lock":        env("EMOJI_LOCK",        "<:lock:EMOJI_ID>"),
+    "gear":        env("EMOJI_GEAR",        "<:gear:EMOJI_ID>"),
+    # --- blue icon pack ---
+    "ac":          env("EMOJI_AC",          "<:ac:EMOJI_ID>"),
+    "vpn":         env("EMOJI_VPN",         "<:vpn:EMOJI_ID>"),
+    "angry":       env("EMOJI_ANGRY",       "<:angry:EMOJI_ID>"),
+    "yes":         env("EMOJI_YES",         "<:yes:EMOJI_ID>"),
+    "pin":         env("EMOJI_PIN",         "<:pin:EMOJI_ID>"),
+    "ban":         env("EMOJI_BAN",         "<:ban:EMOJI_ID>"),
+    "heath":       env("EMOJI_HEATH",       "<:heath:EMOJI_ID>"),
+    "no":          env("EMOJI_NO",          "<:no:EMOJI_ID>"),
+    "camera":      env("EMOJI_CAMERA",      "<:camera:EMOJI_ID>"),
+    "wave":        env("EMOJI_WAVE",        "<:wave:EMOJI_ID>"),
+    "handshake":   env("EMOJI_HANDSHAKE",   "<:handshake:EMOJI_ID>"),
+    "clash":       env("EMOJI_CLASH",       "<:clash:EMOJI_ID>"),
+    "crown":       env("EMOJI_CROWN",       "<:crown:EMOJI_ID>"),
+    "clock":       env("EMOJI_CLOCK",       "<:clock:EMOJI_ID>"),
+    "bug":         env("EMOJI_BUG",         "<:bug:EMOJI_ID>"),
+    "calendar":    env("EMOJI_CALENDAR",    "<:calendar:EMOJI_ID>"),
+    "support":     env("EMOJI_SUPPORT",     "<:support:EMOJI_ID>"),
+    "triangle":    env("EMOJI_TRIANGLE",    "<:triangle:EMOJI_ID>"),
+    "eye":         env("EMOJI_EYE",         "<:eye:EMOJI_ID>"),
+    "description": env("EMOJI_DESCRIPTION", "<:description:EMOJI_ID>"),
 }
 
 def e(name: str) -> str:
-    """Return the custom emoji string for a given name."""
-    return EMOJIS.get(name, "")
+    """Return the custom emoji string for a given name, empty string if not loaded."""
+    val = EMOJIS.get(name, "")
+    return "" if "EMOJI_ID" in val else val
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -804,103 +827,190 @@ EMOJI_SVG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emojis
 
 # Maps emoji key -> SVG filename stem (all match by convention except warn)
 _EMOJI_FILE_MAP = {
-    "verify":  "verify",
-    "key":     "key",
-    "chip":    "chip",
-    "ticket":  "ticket",
-    "rules":   "rules",
-    "cross":   "cross",
-    "shield":  "shield",
-    "arrow":   "arrow",
-    "warn":    "warning",
-    "dot":     "dot",
-    "bell":    "bell",
-    "lock":    "lock",
-    "gear":    "gear",
+    # original (PNG overrides SVG where available)
+    "verify":      "verify",
+    "key":         "key",
+    "chip":        "chip",
+    "ticket":      "support",
+    "rules":       "rules",
+    "cross":       "no",
+    "shield":      "shield",
+    "arrow":       "arrow",
+    "warn":        "triangle",
+    "dot":         "dot",
+    "bell":        "bell",
+    "lock":        "lock",
+    "gear":        "gear",
+    # blue icon pack
+    "ac":          "ac",
+    "vpn":         "vpn",
+    "angry":       "angry",
+    "yes":         "yes",
+    "pin":         "pin",
+    "ban":         "ban",
+    "heath":       "heath",
+    "no":          "no",
+    "camera":      "camera",
+    "wave":        "wave",
+    "handshake":   "handshake",
+    "clash":       "clash",
+    "crown":       "crown",
+    "clock":       "clock",
+    "bug":         "bug",
+    "calendar":    "calendar",
+    "support":     "support",
+    "triangle":    "triangle",
+    "eye":         "eye",
+    "description": "description",
 }
+
+async def _fetch_app_emojis_cb(app_id: int, token: str) -> dict:
+    """Return {name: emoji_obj} for all application emojis (customer bot)."""
+    url     = f"https://discord.com/api/v10/applications/{app_id}/emojis"
+    headers = {"Authorization": f"Bot {token}"}
+    async with aiohttp.ClientSession() as sess:
+        async with sess.get(url, headers=headers) as resp:
+            if resp.status != 200:
+                log.warning("[emojis] fetch returned %s", resp.status)
+                return {}
+            data  = await resp.json()
+            items = data.get("items", data) if isinstance(data, dict) else data
+            return {em["name"]: em for em in items}
+
+async def _create_app_emoji_cb(app_id: int, token: str, name: str, png_bytes: bytes) -> Optional[dict]:
+    """Upload one application emoji; returns emoji object or None."""
+    import base64
+    image_data = "data:image/png;base64," + base64.b64encode(png_bytes).decode()
+    url     = f"https://discord.com/api/v10/applications/{app_id}/emojis"
+    headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as sess:
+        async with sess.post(url, headers=headers, json={"name": name, "image": image_data}) as resp:
+            if resp.status in (200, 201):
+                return await resp.json()
+            body = await resp.text()
+            log.warning("[emojis] create %s -> %s %s", name, resp.status, body[:200])
+            return None
 
 async def _setup_emojis(guild: discord.Guild) -> None:
     """
-    Auto-create custom emojis from /emojis/*.svg on startup.
-    - Reuses existing guild emojis by name (skips re-upload).
-    - Converts SVG -> PNG via cairosvg, uploads via guild.create_custom_emoji().
-    - Patches EMOJIS dict in-place with real <:name:id> strings.
-    - Logs the EMOJI_* env var values so the user can persist them.
+    Sync application emojis (bot-owned, no guild slot limit) on startup.
+    1. Load from DB cache.
+    2. Diff against Discord API list.
+    3. Create missing ones from PNG (preferred) or SVG fallback.
     """
-    try:
-        import cairosvg  # type: ignore
-    except ImportError:
-        log.warning("cairosvg not installed - skipping emoji auto-setup. Add cairosvg>=2.7.0 to requirements.txt")
+    app_id = bot.application_id
+    token  = CONFIG["token"]
+
+    if not app_id:
+        log.warning("[emojis] application_id not available yet - skipping")
         return
 
-    if not os.path.isdir(EMOJI_SVG_DIR):
-        log.warning("No /emojis/ directory found - skipping emoji auto-setup")
-        return
+    emoji_dir = EMOJI_SVG_DIR
 
-    # Build a map of name -> existing emoji for fast lookup
-    existing: dict[str, discord.Emoji] = {em.name: em for em in guild.emojis}
-    created_any = False
-
-    for key, file_stem in _EMOJI_FILE_MAP.items():
-        emoji_name = file_stem  # Discord emoji name = file stem
-        env_var    = f"EMOJI_{key.upper()}"
-
-        # If env var is already set to a real emoji string, skip
-        current = EMOJIS.get(key, "")
-        if current and "EMOJI_ID" not in current:
-            log.info("Emoji %s already configured via env (%s)", key, env_var)
-            continue
-
-        # Reuse existing guild emoji if present
-        if emoji_name in existing:
-            em = existing[emoji_name]
-            fmt = f"<:{em.name}:{em.id}>"
-            EMOJIS[key] = fmt
-            log.info("Reused existing emoji %-10s -> %s  (set %s=%s)", emoji_name, fmt, env_var, fmt)
-            continue
-
-        # Try to upload from SVG
-        svg_path = os.path.join(EMOJI_SVG_DIR, f"{file_stem}.svg")
-        if not os.path.isfile(svg_path):
-            log.warning("SVG not found for emoji key=%s (%s) - skipping", key, svg_path)
-            continue
-
+    # 1. Load cached DB entries
+    with get_db() as conn:
         try:
-            png_bytes: bytes = cairosvg.svg2png(
-                url=svg_path,
-                output_width=128,
-                output_height=128,
-            )
-            em = await guild.create_custom_emoji(name=emoji_name, image=png_bytes)
-            fmt = f"<:{em.name}:{em.id}>"
-            EMOJIS[key] = fmt
-            created_any = True
-            log.info("Created emoji %-10s -> %s  (set %s=%s)", emoji_name, fmt, env_var, fmt)
-        except discord.Forbidden:
-            log.error("Missing Manage Emojis permission - cannot upload emoji %s", emoji_name)
-            break
-        except discord.HTTPException as exc:
-            log.error("Failed to upload emoji %s: %s", emoji_name, exc)
-        except Exception as exc:
-            log.error("Unexpected error uploading emoji %s: %s", emoji_name, exc)
+            rows = conn.execute("SELECT name, emoji_str FROM app_emojis").fetchall()
+            for row in rows:
+                for key, filename in _EMOJI_FILE_MAP.items():
+                    if filename == row["name"] and "EMOJI_ID" in EMOJIS.get(key, "EMOJI_ID"):
+                        EMOJIS[key] = row["emoji_str"]
+        except Exception:
+            pass  # table may not exist on first boot
 
-    if created_any:
-        log.info("=" * 60)
-        log.info("EMOJI SETUP COMPLETE - add these env vars to Railway to persist:")
-        for key in _EMOJI_FILE_MAP:
-            val = EMOJIS.get(key, "")
-            if val and "EMOJI_ID" not in val:
-                log.info("  EMOJI_%s=%s", key.upper(), val)
-        log.info("=" * 60)
+    # 2. Find still-missing keys
+    still_missing = {
+        key: fn for key, fn in _EMOJI_FILE_MAP.items()
+        if "EMOJI_ID" in EMOJIS.get(key, "EMOJI_ID")
+    }
+    if not still_missing:
+        log.info("[emojis] all loaded from DB cache")
+        return
+
+    # 3. Fetch existing application emojis from Discord
+    try:
+        existing = await _fetch_app_emojis_cb(app_id, token)
+    except Exception as exc:
+        log.warning("[emojis] could not fetch: %s", exc)
+        existing = {}
+
+    with get_db() as conn:
+        for key, filename in list(still_missing.items()):
+            if filename in existing:
+                em  = existing[filename]
+                fmt = f"<:{em['name']}:{em['id']}>"
+                EMOJIS[key] = fmt
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_emojis(name, emoji_id, emoji_str, animated, synced_at)"
+                        " VALUES(?,?,?,?,?)",
+                        (filename, str(em["id"]), fmt, int(em.get("animated", False)), "")
+                    )
+                except Exception:
+                    pass
+                del still_missing[key]
+        conn.commit()
+
+    if not still_missing:
+        log.info("[emojis] all synced from API")
+        return
+
+    # 4. Create missing - try PNG first, then SVG
+    if not os.path.isdir(emoji_dir):
+        log.warning("[emojis] emojis/ directory not found - skipping creation")
+        return
+
+    with get_db() as conn:
+        for key, filename in still_missing.items():
+            png_bytes: Optional[bytes] = None
+
+            png_path = os.path.join(emoji_dir, f"{filename}.png")
+            if os.path.isfile(png_path):
+                with open(png_path, "rb") as fh:
+                    png_bytes = fh.read()
+
+            if not png_bytes:
+                svg_path = os.path.join(emoji_dir, f"{filename}.svg")
+                if os.path.isfile(svg_path):
+                    try:
+                        import cairosvg
+                        png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
+                    except ImportError:
+                        log.warning("[emojis] cairosvg not installed, cannot convert SVG for %s", key)
+                        continue
+                    except Exception as exc:
+                        log.warning("[emojis] SVG conversion failed for %s: %s", key, exc)
+                        continue
+                else:
+                    log.warning("[emojis] no PNG or SVG for key=%s file=%s", key, filename)
+                    continue
+
+            try:
+                em = await _create_app_emoji_cb(app_id, token, filename, png_bytes)
+                if em:
+                    fmt = f"<:{em['name']}:{em['id']}>"
+                    EMOJIS[key] = fmt
+                    log.info("[emojis] created :%s: (id=%s)", em["name"], em["id"])
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO app_emojis(name, emoji_id, emoji_str, animated, synced_at)"
+                            " VALUES(?,?,?,?,?)",
+                            (filename, str(em["id"]), fmt, int(em.get("animated", False)), "")
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log.warning("[emojis] creation failed for %s: %s", key, exc)
+        conn.commit()
 
 
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "ticket",  "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
-    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "arrow",   "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
-    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "shield",  "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
-    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "key",     "desc": "Management help",                     "config_key": "ticket_cat_management"},
+    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "support",     "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
+    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "description", "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
+    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "crown",       "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
+    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "shield",      "desc": "Management help",                     "config_key": "ticket_cat_management"},
 }
 
 # ─── TICKET COUNTER ───────────────────────────────────────────────────────────
@@ -916,6 +1026,13 @@ def _ensure_tables():
             "INSERT OR IGNORE INTO ticket_counter (id, next_num) VALUES (1, 1)"
         )
         # Unified tickets table (void_bot owns schema; this is a safety net for first-deploy)
+        conn.execute("""CREATE TABLE IF NOT EXISTS app_emojis (
+            name        TEXT PRIMARY KEY,
+            emoji_id    TEXT NOT NULL,
+            emoji_str   TEXT NOT NULL,
+            animated    INTEGER NOT NULL DEFAULT 0,
+            synced_at   TEXT NOT NULL DEFAULT ''
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS tickets (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             ticket_num      TEXT NOT NULL DEFAULT '0000',
@@ -1824,12 +1941,10 @@ async def on_ready():
     bot.add_view(SetupPingsView())
 
     guild = bot.get_guild(CONFIG["guild_id"])
-    if guild:
-        # Ticket categories are created on demand when tickets are opened,
-        # and deleted when they become empty - no startup setup needed.
-        await _setup_emojis(guild)
-    else:
-        log.warning("Guild %s not found - skipping emoji setup", CONFIG["guild_id"])
+    if not guild:
+        log.warning("Guild %s not found on ready", CONFIG["guild_id"])
+    # Emoji setup uses application emoji API (no guild slot limits)
+    await _setup_emojis(guild)
 
     try:
         synced = await bot.tree.sync()

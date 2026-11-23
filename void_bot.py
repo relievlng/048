@@ -330,35 +330,80 @@ DURATION_MAP = {
 # ─── EMOJI SYSTEM ─────────────────────────────────────────────────────────────
 
 EMOJIS = {
-    "verify":  env("EMOJI_VERIFY",  "<:verify:EMOJI_ID>"),
-    "key":     env("EMOJI_KEY",     "<:key:EMOJI_ID>"),
-    "chip":    env("EMOJI_CHIP",    "<:chip:EMOJI_ID>"),
-    "ticket":  env("EMOJI_TICKET",  "<:ticket:EMOJI_ID>"),
-    "rules":   env("EMOJI_RULES",   "<:rules:EMOJI_ID>"),
-    "cross":   env("EMOJI_CROSS",   "<:cross:EMOJI_ID>"),
-    "shield":  env("EMOJI_SHIELD",  "<:shield:EMOJI_ID>"),
-    "arrow":   env("EMOJI_ARROW",   "<:arrow:EMOJI_ID>"),
-    "warn":    env("EMOJI_WARN",    "<:warn:EMOJI_ID>"),
-    "dot":     env("EMOJI_DOT",     "<:dot:EMOJI_ID>"),
-    "bell":    env("EMOJI_BELL",    "<:bell:EMOJI_ID>"),
-    "lock":    env("EMOJI_LOCK",    "<:lock:EMOJI_ID>"),
-    "gear":    env("EMOJI_GEAR",    "<:gear:EMOJI_ID>"),
+    # --- original keys ---
+    "verify":      env("EMOJI_VERIFY",      "<:verify:EMOJI_ID>"),
+    "key":         env("EMOJI_KEY",         "<:key:EMOJI_ID>"),
+    "chip":        env("EMOJI_CHIP",        "<:chip:EMOJI_ID>"),
+    "ticket":      env("EMOJI_TICKET",      "<:ticket:EMOJI_ID>"),
+    "rules":       env("EMOJI_RULES",       "<:rules:EMOJI_ID>"),
+    "cross":       env("EMOJI_CROSS",       "<:cross:EMOJI_ID>"),
+    "shield":      env("EMOJI_SHIELD",      "<:shield:EMOJI_ID>"),
+    "arrow":       env("EMOJI_ARROW",       "<:arrow:EMOJI_ID>"),
+    "warn":        env("EMOJI_WARN",        "<:warn:EMOJI_ID>"),
+    "dot":         env("EMOJI_DOT",         "<:dot:EMOJI_ID>"),
+    "bell":        env("EMOJI_BELL",        "<:bell:EMOJI_ID>"),
+    "lock":        env("EMOJI_LOCK",        "<:lock:EMOJI_ID>"),
+    "gear":        env("EMOJI_GEAR",        "<:gear:EMOJI_ID>"),
+    # --- blue icon pack ---
+    "ac":          env("EMOJI_AC",          "<:ac:EMOJI_ID>"),
+    "vpn":         env("EMOJI_VPN",         "<:vpn:EMOJI_ID>"),
+    "angry":       env("EMOJI_ANGRY",       "<:angry:EMOJI_ID>"),
+    "yes":         env("EMOJI_YES",         "<:yes:EMOJI_ID>"),
+    "pin":         env("EMOJI_PIN",         "<:pin:EMOJI_ID>"),
+    "ban":         env("EMOJI_BAN",         "<:ban:EMOJI_ID>"),
+    "heath":       env("EMOJI_HEATH",       "<:heath:EMOJI_ID>"),
+    "no":          env("EMOJI_NO",          "<:no:EMOJI_ID>"),
+    "camera":      env("EMOJI_CAMERA",      "<:camera:EMOJI_ID>"),
+    "wave":        env("EMOJI_WAVE",        "<:wave:EMOJI_ID>"),
+    "handshake":   env("EMOJI_HANDSHAKE",   "<:handshake:EMOJI_ID>"),
+    "clash":       env("EMOJI_CLASH",       "<:clash:EMOJI_ID>"),
+    "crown":       env("EMOJI_CROWN",       "<:crown:EMOJI_ID>"),
+    "clock":       env("EMOJI_CLOCK",       "<:clock:EMOJI_ID>"),
+    "bug":         env("EMOJI_BUG",         "<:bug:EMOJI_ID>"),
+    "calendar":    env("EMOJI_CALENDAR",    "<:calendar:EMOJI_ID>"),
+    "support":     env("EMOJI_SUPPORT",     "<:support:EMOJI_ID>"),
+    "triangle":    env("EMOJI_TRIANGLE",    "<:triangle:EMOJI_ID>"),
+    "eye":         env("EMOJI_EYE",         "<:eye:EMOJI_ID>"),
+    "description": env("EMOJI_DESCRIPTION", "<:description:EMOJI_ID>"),
 }
 
+# Maps EMOJIS key -> filename in emojis/ (no extension - try .png then .svg)
 _EMOJI_FILE_MAP = {
-    "verify":  "verify",
-    "key":     "key",
-    "chip":    "chip",
-    "ticket":  "ticket",
-    "rules":   "rules",
-    "cross":   "cross",
-    "shield":  "shield",
-    "arrow":   "arrow",
-    "warn":    "warning",
-    "dot":     "dot",
-    "bell":    "bell",
-    "lock":    "lock",
-    "gear":    "gear",
+    # original (SVG fallbacks kept, PNGs override where available)
+    "verify":      "verify",
+    "key":         "key",
+    "chip":        "chip",
+    "ticket":      "support",    # support.png is better
+    "rules":       "rules",
+    "cross":       "no",         # no.png replaces cross for X
+    "shield":      "shield",     # shield.png from pack
+    "arrow":       "arrow",
+    "warn":        "triangle",   # triangle.png as warning
+    "dot":         "dot",
+    "bell":        "bell",
+    "lock":        "lock",       # lock.png from pack
+    "gear":        "gear",
+    # blue icon pack (all PNG)
+    "ac":          "ac",
+    "vpn":         "vpn",
+    "angry":       "angry",
+    "yes":         "yes",
+    "pin":         "pin",
+    "ban":         "ban",
+    "heath":       "heath",
+    "no":          "no",
+    "camera":      "camera",
+    "wave":        "wave",
+    "handshake":   "handshake",
+    "clash":       "clash",
+    "crown":       "crown",
+    "clock":       "clock",
+    "bug":         "bug",
+    "calendar":    "calendar",
+    "support":     "support",
+    "triangle":    "triangle",
+    "eye":         "eye",
+    "description": "description",
 }
 
 def _emoji_in_text(key: str) -> str:
@@ -457,26 +502,39 @@ async def _setup_emojis() -> None:
         log.info("All emojis synced from application emoji list.")
         return
 
-    # 5. Create missing emojis from SVG files
-    try:
-        import cairosvg
-    except ImportError:
-        log.warning("cairosvg not installed - cannot create missing emojis: %s",
-                    list(still_missing.keys()))
-        return
-
+    # 5. Create missing emojis - try PNG first, then SVG via cairosvg
     emoji_dir = os.path.join(os.path.dirname(__file__), "emojis")
     if not os.path.isdir(emoji_dir):
         log.warning("emojis/ directory not found - skipping creation")
         return
 
     for key, filename in still_missing.items():
-        svg_path = os.path.join(emoji_dir, f"{filename}.svg")
-        if not os.path.isfile(svg_path):
-            log.warning("SVG not found for emoji key=%s file=%s", key, filename)
-            continue
+        png_bytes: Optional[bytes] = None
+
+        # 5a. Direct PNG (preferred - no conversion needed)
+        png_path = os.path.join(emoji_dir, f"{filename}.png")
+        if os.path.isfile(png_path):
+            with open(png_path, "rb") as fh:
+                png_bytes = fh.read()
+
+        # 5b. SVG fallback via cairosvg
+        if not png_bytes:
+            svg_path = os.path.join(emoji_dir, f"{filename}.svg")
+            if os.path.isfile(svg_path):
+                try:
+                    import cairosvg
+                    png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
+                except ImportError:
+                    log.warning("cairosvg not installed, cannot convert SVG for %s", key)
+                    continue
+                except Exception as exc:
+                    log.warning("SVG conversion failed for %s: %s", key, exc)
+                    continue
+            else:
+                log.warning("No PNG or SVG found for emoji key=%s file=%s", key, filename)
+                continue
+
         try:
-            png_bytes = cairosvg.svg2png(url=svg_path, output_width=128, output_height=128)
             e = await _create_app_emoji(app_id, token, filename, png_bytes)
             if e:
                 fmt = f"<:{e['name']}:{e['id']}>"
@@ -567,14 +625,14 @@ TICKET_CATEGORIES = {
     "support": {
         "label":      "Support",
         "desc":       "Product support or general enquiries",
-        "emoji_key":  "ticket",
+        "emoji_key":  "support",
         "config_key": "ticket_cat_support",
         "cat_name":   "Support Tickets",
     },
     "purchase": {
         "label":      "Purchase",
         "desc":       "Purchase or renew your subscription",
-        "emoji_key":  "key",
+        "emoji_key":  "crown",
         "config_key": "ticket_cat_purchase",
         "cat_name":   "Purchase Tickets",
     },
@@ -588,7 +646,7 @@ TICKET_CATEGORIES = {
     "media": {
         "label":      "Media",
         "desc":       "Media enquiries",
-        "emoji_key":  "arrow",
+        "emoji_key":  "camera",
         "config_key": "ticket_cat_media",
         "cat_name":   "Media Tickets",
     },
@@ -1557,20 +1615,20 @@ def _geolocate(ip: str) -> dict:
     except Exception:
         return {}
 
-# Event type -> (webhook_config_key, embed_color, label_emoji)
+# Event type -> (webhook_config_key, embed_color, label, emoji_key)
 _EVENT_WEBHOOK_MAP = {
-    "auth_ok":           ("webhook_key_events",    0x57F287, "AUTH OK"),
-    "auth_first_bind":   ("webhook_key_events",    0x5865F2, "HWID BOUND"),
-    "auth_expired":      ("webhook_key_events",    0xFEE75C, "EXPIRED"),
-    "auth_hwid_mismatch":("webhook_hwid_flags",    0xED4245, "HWID MISMATCH"),
-    "auth_banned":       ("webhook_key_events",    0xED4245, "BANNED"),
-    "auth_inactive":     ("webhook_key_events",    0xFFA500, "INACTIVE"),
-    "inject":            ("webhook_loader_events", 0x57F287, "INJECT"),
-    "menu_open":         ("webhook_loader_events", 0x9B59B6, "MENU OPEN"),
-    "menu_close":        ("webhook_loader_events", 0x2C2F33, "MENU CLOSE"),
-    "destruct":          ("webhook_loader_events", 0xED4245, "DESTRUCT"),
-    "fac_reset_request": ("webhook_loader_events", 0xFFA500, "FAC RESET"),
-    "custom":            ("webhook_loader_events", 0x5865F2, "CUSTOM"),
+    "auth_ok":           ("webhook_key_events",    0x57F287, "AUTH OK",      "yes"),
+    "auth_first_bind":   ("webhook_key_events",    0x5865F2, "HWID BOUND",   "ac"),
+    "auth_expired":      ("webhook_key_events",    0xFEE75C, "EXPIRED",      "clock"),
+    "auth_hwid_mismatch":("webhook_hwid_flags",    0xED4245, "HWID MISMATCH","clash"),
+    "auth_banned":       ("webhook_key_events",    0xED4245, "BANNED",       "ban"),
+    "auth_inactive":     ("webhook_key_events",    0xFFA500, "INACTIVE",     "lock"),
+    "inject":            ("webhook_loader_events", 0x57F287, "INJECT",       "shield"),
+    "menu_open":         ("webhook_loader_events", 0x9B59B6, "MENU OPEN",    "eye"),
+    "menu_close":        ("webhook_loader_events", 0x2C2F33, "MENU CLOSE",   "no"),
+    "destruct":          ("webhook_loader_events", 0xED4245, "DESTRUCT",     "angry"),
+    "fac_reset_request": ("webhook_loader_events", 0xFFA500, "FAC RESET",    "triangle"),
+    "custom":            ("webhook_loader_events", 0x5865F2, "CUSTOM",       "description"),
 }
 
 
@@ -1590,9 +1648,12 @@ def _webhook_post_sync(url: str, payload: dict) -> None:
 
 def _build_event_embed(discord_id, hwid, ip, event_type, product, system, geo, note) -> dict:
     """Build a Discord embed dict for a cheat event."""
-    cfg = _EVENT_WEBHOOK_MAP.get(event_type, ("webhook_loader_events", 0x99AAB5, event_type.upper()))
-    label = cfg[2]
-    color = cfg[1]
+    cfg       = _EVENT_WEBHOOK_MAP.get(event_type, ("webhook_loader_events", 0x99AAB5, event_type.upper(), "description"))
+    label     = cfg[2]
+    color     = cfg[1]
+    em_key    = cfg[3] if len(cfg) > 3 else "description"
+    em_str    = _emoji_in_text(em_key)   # "<:name:id>" or "" if not loaded yet
+    em_prefix = f"{em_str} " if em_str else ""
 
     sys = system or {}
     extra = sys.get("extra") or {}
@@ -1637,7 +1698,7 @@ def _build_event_embed(discord_id, hwid, ip, event_type, product, system, geo, n
 
     return {
         "embeds": [{
-            "title":     f"[{label}]",
+            "title":     f"{em_prefix}[{label}]",
             "color":     color,
             "fields":    fields,
             "timestamp": _now_iso(),
