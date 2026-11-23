@@ -1368,21 +1368,6 @@ class VerifyCaptchaModal(discord.ui.Modal):
 
         user_id = str(interaction.user.id)
 
-        # Check by Discord ID - tickets first, then payments
-        ticket = DB.execute(
-            "SELECT invoice_id, product FROM tickets WHERE discord_id=? AND bot_source='void'", (user_id,)
-        ).fetchone()
-        if not ticket:
-            payment = DB.execute(
-                "SELECT invoice_id, product FROM payments WHERE discord_id=?", (user_id,)
-            ).fetchone()
-            if not payment:
-                await interaction.followup.send(
-                    "No purchase found for your account. Contact staff if you believe this is wrong.",
-                    ephemeral=True,
-                )
-                return
-
         # Assign verified role
         verified_role_id = CONFIG.get("verified_role_id", 0)
         role_assigned = False
