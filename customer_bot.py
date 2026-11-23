@@ -510,11 +510,8 @@ def _ticket_panel_payload() -> dict:
         "-# Only you and our staff can see your ticket channel."
     )})
     body.append({"type": 14})
-    first = True
     for cat_id, cat in TICKET_CATEGORIES.items():
-        if not first:
-            body.append({"type": 14})
-        first = False
+        body.append({"type": 14})
         em = _emoji_in_text(cat["emoji_key"])
         prefix = f"{em} " if em else ""
         body.append(_v2_section(
@@ -524,17 +521,18 @@ def _ticket_panel_payload() -> dict:
             btn_emoji_name=cat["emoji_key"],
             btn_style=2,
         ))
-    # Re-Setup: for existing customers needing setup help again
-    body.append({"type": 14})
-    em_rs = _emoji_in_text("description")
-    rs_prefix = f"{em_rs} " if em_rs else ""
-    body.append(_v2_section(
-        f"{rs_prefix}**Re-Setup** - Already purchased? Open a re-setup request",
-        "Re-Setup",
-        "ticket_open_resetup",
-        btn_emoji_name="description",
-        btn_style=1,  # Primary (blue)
-    ))
+        # Re-Setup sits right after Setup in the panel
+        if cat_id == "setup":
+            body.append({"type": 14})
+            em_rs = _emoji_in_text("verify")
+            rs_prefix = f"{em_rs} " if em_rs else ""
+            body.append(_v2_section(
+                f"{rs_prefix}**Re-Setup** - Already set up? Open a re-setup request",
+                "Re-Setup",
+                "ticket_open_resetup",
+                btn_emoji_name=None,
+                btn_style=1,  # Primary blue
+            ))
     return _v2_container(body, accent=BRAND_COLOR)
 
 
@@ -1064,10 +1062,10 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 # ─── TICKET SYSTEM ────────────────────────────────────────────────────────────
 
 TICKET_CATEGORIES = {
-    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "support",     "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
-    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "description", "desc": "First time setup",                    "config_key": "ticket_cat_setup"},
-    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "crown",       "desc": "Purchase or renew",                   "config_key": "ticket_cat_purchase"},
-    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "shield",      "desc": "Management help",                     "config_key": "ticket_cat_management"},
+    "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",   "emoji_key": "crown",       "desc": "Purchase or renew a product",         "config_key": "ticket_cat_purchase"},
+    "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",      "emoji_key": "description", "desc": "First time setup assistance",         "config_key": "ticket_cat_setup"},
+    "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",    "emoji_key": "support",     "desc": "Product support or general enquiries","config_key": "ticket_cat_support"},
+    "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management", "emoji_key": "shield",      "desc": "Account or management requests",      "config_key": "ticket_cat_management"},
 }
 
 # ─── TICKET COUNTER ───────────────────────────────────────────────────────────
