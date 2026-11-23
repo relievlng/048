@@ -158,6 +158,84 @@ def init_db(path: str) -> sqlite3.Connection:
             created_at    TEXT NOT NULL DEFAULT '',
             delivered_at  TEXT
         );
+        -- Loader tables owned by bot.py / void_bot.py. Created here as a safety
+        -- net so the staff bot works even when its DB volume predates them or
+        -- the owning service has not run yet. Schemas match the owners exactly.
+        CREATE TABLE IF NOT EXISTS users (
+            discord_id      TEXT PRIMARY KEY,
+            key             TEXT UNIQUE NOT NULL,
+            hwid            TEXT,
+            product         TEXT NOT NULL DEFAULT 'default',
+            status          TEXT NOT NULL DEFAULT 'active',
+            registered_at   TEXT NOT NULL,
+            expires_at      TEXT,
+            hwid_resets     INTEGER NOT NULL DEFAULT 0,
+            last_seen       TEXT,
+            ip_last         TEXT,
+            notes           TEXT,
+            ban_reason      TEXT,
+            fac_reset_auth  INTEGER NOT NULL DEFAULT 0,
+            fac_auth_key    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS key_pool (
+            key         TEXT PRIMARY KEY,
+            product     TEXT NOT NULL DEFAULT 'default',
+            visibility  TEXT NOT NULL DEFAULT 'private',
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT,
+            claimed     INTEGER NOT NULL DEFAULT 0,
+            created_by  TEXT,
+            notes       TEXT
+        );
+        CREATE TABLE IF NOT EXISTS hwid_bans (
+            hwid        TEXT PRIMARY KEY,
+            reason      TEXT,
+            banned_at   TEXT NOT NULL,
+            banned_by   TEXT
+        );
+        CREATE TABLE IF NOT EXISTS login_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id  TEXT NOT NULL,
+            hwid        TEXT,
+            ip          TEXT,
+            timestamp   TEXT NOT NULL,
+            product     TEXT,
+            status      TEXT NOT NULL DEFAULT 'ok'
+        );
+        CREATE TABLE IF NOT EXISTS events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id  TEXT,
+            hwid        TEXT,
+            ip          TEXT,
+            timestamp   TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            product     TEXT,
+            geo_country TEXT,
+            geo_city    TEXT,
+            geo_isp     TEXT,
+            geo_vpn     INTEGER NOT NULL DEFAULT 0,
+            sys_os      TEXT,
+            sys_build   TEXT,
+            sys_cpu     TEXT,
+            sys_ram     TEXT,
+            sys_screen  TEXT,
+            sys_locale  TEXT,
+            sys_hostname TEXT,
+            metadata    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS changelogs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            product         TEXT NOT NULL,
+            version         TEXT,
+            date            TEXT NOT NULL,
+            added           TEXT NOT NULL,
+            removed         TEXT,
+            posted_by       TEXT NOT NULL,
+            posted_at       TEXT NOT NULL,
+            void_msg_id     TEXT,
+            customer_msg_id TEXT,
+            staff_msg_id    TEXT
+        );
     """)
     conn.commit()
     # Schema guards in case void_bot added columns staff_bot's minimal CREATE missed
