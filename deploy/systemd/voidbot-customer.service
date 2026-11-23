@@ -1,0 +1,16 @@
+[Unit]
+Description=Void Customer Bot (customer_bot.py)
+After=network-online.target voidbot-void.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voidbots
+WorkingDirectory=/opt/voidbots
+EnvironmentFile=/opt/voidbots/env/customer.env
+ExecStart=/opt/voidbots/venv/bin/python /opt/voidbots/customer_bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

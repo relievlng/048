@@ -1,0 +1,16 @@
+[Unit]
+Description=Void Staff Bot (staff_bot.py)
+After=network-online.target voidbot-customer.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voidbots
+WorkingDirectory=/opt/voidbots
+EnvironmentFile=/opt/voidbots/env/staff.env
+ExecStart=/opt/voidbots/venv/bin/python /opt/voidbots/staff_bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

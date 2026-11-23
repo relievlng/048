@@ -1,0 +1,16 @@
+[Unit]
+Description=Void Sales Bot (void_bot.py)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voidbots
+WorkingDirectory=/opt/voidbots
+EnvironmentFile=/opt/voidbots/env/void.env
+ExecStart=/opt/voidbots/venv/bin/python /opt/voidbots/void_bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
