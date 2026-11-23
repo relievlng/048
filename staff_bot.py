@@ -54,6 +54,10 @@ CONFIG = {
     "db_path":             env("DB_PATH", "/data/keylock.db"),
     "main_guild_id":       env_int("MAIN_GUILD_ID"),
     "void_guild_id":       env_int("VOID_GUILD_ID"),
+    # Customer bot HTTP endpoint for delivering key DMs (it can reach customers
+    # this bot cannot). Shared INTERNAL_API_KEY authenticates the call.
+    "customer_bot_url":    env("CUSTOMER_BOT_URL", ""),
+    "internal_api_key":    env("INTERNAL_API_KEY", ""),
     # keys shared with main bot commands
     "loader_log_channel_id": env_int("LOADER_LOG_CHANNEL_ID"),
     "verified_role_id":    env_int("VERIFIED_ROLE_ID"),
@@ -1287,34 +1291,71 @@ async def cmd_keygen(i: discord.Interaction,
         prod_icon = "🌐" if prod == "public" else "🔒"
         dm_status = None
         if deliver_to:
-            # Queue delivery for the customer bot. The staff bot usually does not
-            # share a server with customers and cannot DM them directly, but the
-            # customer bot lives in the customer guild and polls this queue.
-            # CREATE IF NOT EXISTS guards against a stale DB that predates this table.
-            DB.execute("""CREATE TABLE IF NOT EXISTS key_deliveries (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                discord_id    TEXT NOT NULL,
-                key           TEXT NOT NULL,
-                product       TEXT,
-                expires_label TEXT,
-                invoice_id    TEXT,
-                status        TEXT NOT NULL DEFAULT 'pending',
-                attempts      INTEGER NOT NULL DEFAULT 0,
-                last_error    TEXT,
-                created_by    TEXT,
-                created_at    TEXT NOT NULL DEFAULT '',
-                delivered_at  TEXT
-            )""")
-            DB.execute(
-                "INSERT INTO key_deliveries "
-                "(discord_id, key, product, expires_label, invoice_id, status, created_by, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (str(deliver_to.id), k, prod, expires_label, inv, "pending", str(i.user.id), now_iso())
-            )
-            DB.commit()
-            audit("KEY_QUEUED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-                  detail=f"key={k[:20]} product={prod}")
-            dm_status = f"Queued - the customer bot will DM {deliver_to.mention} within a few seconds"
+            did = str(deliver_to.id)
+            cust_url = (CONFIG.get("customer_bot_url") or "").strip().rstrip("/")
+            delivered = False
+            # Primary path: ask the customer bot (it is in the customer guild and
+            # can DM customers this bot cannot) to send the key over HTTP.
+            if cust_url:
+                try:
+                    async with aiohttp.ClientSession() as sess:
+                        async with sess.post(
+                            cust_url + "/deliver_key",
+                            json={
+                                "api_key": CONFIG.get("internal_api_key", ""),
+                                "discord_id": did,
+                                "key": k,
+                                "product": prod,
+                                "expires_label": expires_label,
+                            },
+                            timeout=aiohttp.ClientTimeout(total=20),
+                        ) as r:
+                            try:
+                                data = await r.json()
+                            except Exception:
+                                data = {}
+                    if r.status == 200 and data.get("ok"):
+                        delivered = True
+                        dm_status = f"Delivered to {deliver_to.mention} via the customer bot"
+                        audit("KEY_DELIVERED", actor_id=str(i.user.id), target_id=did,
+                              detail=f"key={k[:20]} product={prod}")
+                    else:
+                        reason = data.get("error") or f"HTTP {r.status}"
+                        dm_status = f"Customer bot could not DM {deliver_to.mention}: {reason}"
+                except Exception as e:
+                    dm_status = f"Could not reach customer bot: {e}"
+
+            # Fallback: queue the key so the customer bot's DB poller can pick it
+            # up (only works if both services share the same DB volume).
+            if not delivered:
+                DB.execute("""CREATE TABLE IF NOT EXISTS key_deliveries (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_id    TEXT NOT NULL,
+                    key           TEXT NOT NULL,
+                    product       TEXT,
+                    expires_label TEXT,
+                    invoice_id    TEXT,
+                    status        TEXT NOT NULL DEFAULT 'pending',
+                    attempts      INTEGER NOT NULL DEFAULT 0,
+                    last_error    TEXT,
+                    created_by    TEXT,
+                    created_at    TEXT NOT NULL DEFAULT '',
+                    delivered_at  TEXT
+                )""")
+                DB.execute(
+                    "INSERT INTO key_deliveries "
+                    "(discord_id, key, product, expires_label, invoice_id, status, created_by, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (did, k, prod, expires_label, inv, "pending", str(i.user.id), now_iso())
+                )
+                DB.commit()
+                audit("KEY_QUEUED", actor_id=str(i.user.id), target_id=did,
+                      detail=f"key={k[:20]} product={prod}")
+                if not cust_url:
+                    dm_status = (f"Queued for {deliver_to.mention}. Set `CUSTOMER_BOT_URL` "
+                                 f"(and `INTERNAL_API_KEY`) on the staff bot for instant DM delivery.")
+                elif not dm_status:
+                    dm_status = f"Queued for {deliver_to.mention} (customer bot delivery unavailable)"
 
         linked_note = " Key linked to Discord ID." if deliver_to else " Key added to pool (unclaimed)."
         result_embed = discord.Embed(

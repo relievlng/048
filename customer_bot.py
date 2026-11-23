@@ -345,6 +345,53 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
+    def do_POST(self):
+        # /deliver_key : staff bot asks this bot to DM a license key to a member.
+        # This bot lives in the customer guild, so it can reach customers the
+        # staff bot cannot. Auth via the shared INTERNAL_API_KEY.
+        if self.path != "/deliver_key":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            self._json({"ok": False, "error": "bad json"}, 400)
+            return
+        expected = CONFIG.get("internal_api_key", "")
+        if expected and body.get("api_key") != expected:
+            self._json({"ok": False, "error": "forbidden"}, 403)
+            return
+        did = str(body.get("discord_id") or "").strip()
+        key = str(body.get("key") or "").strip()
+        product = body.get("product") or "private"
+        expires_label = body.get("expires_label") or "Lifetime"
+        if not did or not key:
+            self._json({"ok": False, "error": "missing discord_id or key"}, 400)
+            return
+        loop = getattr(bot, "loop", None)
+        if loop is None or not loop.is_running():
+            self._json({"ok": False, "error": "bot not ready"}, 503)
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                _dm_key(did, key, product, expires_label), loop
+            )
+            result = fut.result(timeout=20)
+        except Exception as ex:
+            result = {"ok": False, "error": f"dispatch failed: {ex}"}
+        self._json(result, 200 if result.get("ok") else 502)
+
+    def _json(self, data: dict, status: int = 200):
+        payload = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def log_message(self, *args):
         pass
 
@@ -2317,6 +2364,38 @@ def _key_dm_embed(key: str, product: str, expires_label: str) -> discord.Embed:
     em.add_field(name="Valid For", value=expires_label or "Lifetime", inline=True)
     em.set_footer(text="Keep this key private - do not share it with anyone.")
     return em
+
+
+async def _dm_key(discord_id: str, key: str, product: str, expires_label: str) -> dict:
+    """DM a license key to a user from this bot. Returns {ok, error}. Never raises."""
+    try:
+        user = bot.get_user(int(discord_id)) or await bot.fetch_user(int(discord_id))
+        await user.send(embed=_key_dm_embed(key, product, expires_label))
+        log.info("[deliver_key] DM sent user=%s key=%s", discord_id, key[:12])
+        try:
+            await send_log(
+                title="Key Delivered",
+                description=f"<@{discord_id}> (`{discord_id}`) received their license key via DM.",
+                color=0x57F287,
+                webhook_key="wh_key_generated",
+                fields=[
+                    {"name": "Product", "value": f"`{product or 'private'}`", "inline": True},
+                    {"name": "Valid For", "value": f"`{expires_label or 'Lifetime'}`", "inline": True},
+                ],
+                footer=f"User ID: {discord_id}",
+            )
+        except Exception:
+            pass
+        return {"ok": True}
+    except discord.Forbidden:
+        log.warning("[deliver_key] Forbidden user=%s (DMs closed or not in server)", discord_id)
+        return {"ok": False, "error": "User has DMs closed or is not in the customer server"}
+    except discord.NotFound:
+        log.warning("[deliver_key] user not found id=%s", discord_id)
+        return {"ok": False, "error": "User not found by ID"}
+    except Exception as ex:
+        log.warning("[deliver_key] failed user=%s: %s", discord_id, ex)
+        return {"ok": False, "error": str(ex)}
 
 
 def _fetch_pending_deliveries() -> list:
