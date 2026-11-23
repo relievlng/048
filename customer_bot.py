@@ -2262,6 +2262,46 @@ async def close_cmd(interaction: discord.Interaction):
         return
     await close_ticket(interaction)
 
+@bot.tree.command(name="debug-db", description="[Admin] Show DB stats and invoice lookup.")
+@app_commands.describe(invoice_id="Optional invoice ID to look up directly")
+@app_commands.checks.has_role(CONFIG["admin_role_id"])
+async def debug_db(interaction: discord.Interaction, invoice_id: Optional[str] = None):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        with get_db() as conn:
+            t_count  = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
+            p_count  = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+            t_inv    = conn.execute("SELECT COUNT(*) FROM tickets  WHERE invoice_id IS NOT NULL").fetchone()[0]
+            p_inv    = conn.execute("SELECT COUNT(*) FROM payments WHERE invoice_id IS NOT NULL").fetchone()[0]
+            db_path  = CONFIG.get("db_path", "?")
+
+            lines = [
+                f"**DB path:** `{db_path}`",
+                f"**tickets:** {t_count} rows, {t_inv} with invoice_id",
+                f"**payments:** {p_count} rows, {p_inv} with invoice_id",
+            ]
+
+            if invoice_id:
+                inv = invoice_id.strip().upper()
+                rt = conn.execute("SELECT discord_id, product, expires_at FROM tickets  WHERE invoice_id=?", (inv,)).fetchone()
+                rp = conn.execute("SELECT discord_id, product, expires_at FROM payments WHERE invoice_id=?", (inv,)).fetchone()
+                lines.append(f"\n**Lookup:** `{inv}`")
+                if rt:
+                    lines.append(f"tickets  -> discord_id={rt['discord_id']} product={rt['product']}")
+                else:
+                    lines.append("tickets  -> NOT FOUND")
+                if rp:
+                    lines.append(f"payments -> discord_id={rp['discord_id']} product={rp['product']}")
+                else:
+                    lines.append("payments -> NOT FOUND")
+
+    except Exception as ex:
+        await interaction.followup.send(f"DB error: `{ex}`", ephemeral=True)
+        return
+
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 # ─── ENTRY POINT ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
