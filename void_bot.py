@@ -110,7 +110,67 @@ def init_db(path: str) -> sqlite3.Connection:
             created_at  TEXT NOT NULL,
             closed_at   TEXT,
             status      TEXT NOT NULL DEFAULT 'open',
-            transcript  TEXT
+            transcript  TEXT,
+            invoice_id  TEXT,
+            paid_at     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS tickets (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_num      TEXT NOT NULL DEFAULT '0000',
+            channel_id      TEXT UNIQUE NOT NULL,
+            guild_id        TEXT NOT NULL DEFAULT '',
+            bot_source      TEXT NOT NULL DEFAULT 'void',
+            discord_id      TEXT NOT NULL,
+            type            TEXT,
+            category        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'open',
+            claimed_by      TEXT,
+            opened_at       TEXT NOT NULL,
+            closed_at       TEXT,
+            closed_by       TEXT,
+            assigned_to     TEXT,
+            payment_status  TEXT NOT NULL DEFAULT 'none',
+            invoice_id      TEXT,
+            paid_at         TEXT,
+            resolution      TEXT,
+            transcript      TEXT,
+            notes           TEXT
+        );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT NOT NULL,
+            bot_source  TEXT NOT NULL DEFAULT 'void',
+            action      TEXT NOT NULL,
+            actor_id    TEXT,
+            target_id   TEXT,
+            detail      TEXT
+        );
+        CREATE TABLE IF NOT EXISTS changelogs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            product         TEXT NOT NULL,
+            version         TEXT,
+            date            TEXT NOT NULL,
+            added           TEXT NOT NULL,
+            removed         TEXT,
+            posted_by       TEXT NOT NULL,
+            posted_at       TEXT NOT NULL,
+            void_msg_id     TEXT,
+            customer_msg_id TEXT,
+            staff_msg_id    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ticket_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
+            author_id   TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            timestamp   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS app_emojis (
+            name        TEXT PRIMARY KEY,
+            emoji_id    TEXT NOT NULL,
+            emoji_str   TEXT NOT NULL,
+            animated    INTEGER NOT NULL DEFAULT 0,
+            synced_at   TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS void_panels (
             key         TEXT PRIMARY KEY,
@@ -123,6 +183,8 @@ def init_db(path: str) -> sqlite3.Connection:
             discord_id   TEXT NOT NULL,
             key          TEXT NOT NULL,
             product      TEXT NOT NULL,
+            amount       TEXT,
+            method       TEXT,
             expires_at   TEXT,
             paid_at      TEXT NOT NULL,
             confirmed_by TEXT NOT NULL,
@@ -130,19 +192,51 @@ def init_db(path: str) -> sqlite3.Connection:
         );
     """)
     conn.commit()
-    # Migrations
+    # Migrations - safe ALTER TABLE (ignored if column already exists)
     for migration in [
         "ALTER TABLE key_pool ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'",
         "ALTER TABLE users ADD COLUMN fac_reset_auth INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE users ADD COLUMN fac_auth_key TEXT",
         "ALTER TABLE void_tickets ADD COLUMN invoice_id TEXT",
         "ALTER TABLE void_tickets ADD COLUMN paid_at TEXT",
+        "ALTER TABLE payments ADD COLUMN amount TEXT",
+        "ALTER TABLE payments ADD COLUMN method TEXT",
+        # tickets schema guards: if staff_bot created the table first with minimal schema
+        "ALTER TABLE tickets ADD COLUMN ticket_num TEXT NOT NULL DEFAULT '0000'",
+        "ALTER TABLE tickets ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'void'",
+        "ALTER TABLE tickets ADD COLUMN category TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN type TEXT",
+        "ALTER TABLE tickets ADD COLUMN closed_by TEXT",
+        "ALTER TABLE tickets ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'none'",
+        "ALTER TABLE tickets ADD COLUMN invoice_id TEXT",
+        "ALTER TABLE tickets ADD COLUMN paid_at TEXT",
+        "ALTER TABLE tickets ADD COLUMN resolution TEXT",
+        "ALTER TABLE tickets ADD COLUMN transcript TEXT",
+        "ALTER TABLE tickets ADD COLUMN assigned_to TEXT",
+        "ALTER TABLE audit_log ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'void'",
     ]:
         try:
             conn.execute(migration)
             conn.commit()
         except Exception:
             pass
+    # Migrate void_tickets -> unified tickets (idempotent via IGNORE on UNIQUE channel_id)
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO tickets
+                (channel_id, guild_id, bot_source, discord_id, category, type,
+                 status, claimed_by, opened_at, closed_at, invoice_id, paid_at,
+                 transcript, ticket_num)
+            SELECT
+                channel_id, guild_id, 'void', user_id, category, category,
+                status, claimed_by, created_at, closed_at, invoice_id, paid_at,
+                transcript, printf('%04d', id)
+            FROM void_tickets
+        """)
+        conn.commit()
+    except Exception as _mig_err:
+        log.warning("void_tickets migration partial: %s", _mig_err)
     log.info("Database ready: %s", path)
     return conn
 
@@ -549,38 +643,43 @@ def _product_panel_payload(product_id: str) -> dict:
 
 
 def _payment_panel_payload() -> dict:
-    em_key   = _emoji_in_text("key")
-    em_warn  = _emoji_in_text("warn")
-    em_dot   = _emoji_in_text("dot")
-    em_cross = _emoji_in_text("cross")
-    pfx    = f"{em_key} "   if em_key   else "\U0001f4b3 "
-    warn   = f"{em_warn} "  if em_warn  else "⚠️ "
-    bullet = f"{em_dot} "   if em_dot   else "- "
-    cross  = f"{em_cross} " if em_cross else "❌ "
+    em_key    = _emoji_in_text("key")
+    em_warn   = _emoji_in_text("warn")
+    em_dot    = _emoji_in_text("dot")
+    em_cross  = _emoji_in_text("cross")
+    em_chip   = _emoji_in_text("chip")
+    em_shield = _emoji_in_text("shield")
+    em_arrow  = _emoji_in_text("arrow")
+    pfx    = f"{em_key} "    if em_key    else "\U0001f511 "
+    warn   = f"{em_warn} "   if em_warn   else "⚠️ "
+    bullet = f"{em_dot} "    if em_dot    else "- "
+    cross  = f"{em_cross} "  if em_cross  else "❌ "
+    chip   = f"{em_chip} "   if em_chip   else "\U0001f4b3 "
+    shield = f"{em_shield} " if em_shield else "\U0001f6e1️ "
+    arrow  = f"{em_arrow} "  if em_arrow  else "-> "
 
     body: list = []
     body.extend(_v2_banner())
     body.append({"type": 10, "content": (
-        f"## {pfx}Payment Methods\n"
-        "All prices are in USD only."
+        f"# {pfx}Payment Methods\n"
+        "-# All prices are in USD. Payments are processed manually by staff."
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        f"{bullet}**PayPal** (Friends & Family)\n"
-        f"{bullet}**Bank Transfer**\n"
-        f"{bullet}**CashApp**\n"
-        f"{bullet}**Giftcard**\n"
-        f"{bullet}**Crypto**"
+        f"{chip}**PayPal** - Friends & Family only\n"
+        f"{chip}**Bank Transfer** - Staff will provide details\n"
+        f"{chip}**Giftcard** - Most major retailers accepted\n"
+        f"{chip}**Crypto** - BTC, ETH, LTC, USDT and more"
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        f"{warn}**ALL PAYMENTS MUST BE CONFIRMED BY STAFF ONLY.**\n"
-        "If anyone claims they can get you access otherwise, report it to management immediately.\n\n"
-        f"{cross}**Chargebacks void your license with no refund.**"
+        f"{warn}**PAYMENTS CONFIRMED BY STAFF ONLY.**\n"
+        f"{arrow}If anyone claims they can process your payment outside of a staff ticket, report it immediately.\n\n"
+        f"{cross}**Chargebacks permanently void your license with no refund.**"
     )})
     body.append({"type": 14})
     body.append({"type": 10, "content": (
-        "Have a question about another payment method? Open a support ticket."
+        f"{shield}Need a different payment method? Open a support ticket and ask staff."
     )})
     return _v2_container(body, accent=BRAND_COLOR)
 
@@ -638,7 +737,7 @@ _ticket_lock = asyncio.Lock()
 
 async def _next_ticket_number(guild_id: int) -> int:
     row = DB.execute(
-        "SELECT COUNT(*) AS cnt FROM void_tickets WHERE guild_id=?", (str(guild_id),)
+        "SELECT COUNT(*) AS cnt FROM tickets WHERE guild_id=? AND bot_source='void'", (str(guild_id),)
     ).fetchone()
     return (row["cnt"] or 0) + 1
 
@@ -652,7 +751,7 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
 
         # Check for existing open ticket in this category
         existing = DB.execute(
-            "SELECT channel_id FROM void_tickets WHERE user_id=? AND guild_id=? AND category=? AND status='open'",
+            "SELECT channel_id FROM tickets WHERE discord_id=? AND guild_id=? AND category=? AND status='open' AND bot_source='void'",
             (str(interaction.user.id), str(interaction.guild.id), category_id)
         ).fetchone()
         if existing:
@@ -673,10 +772,20 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         per_cat_id = CONFIG.get(cat.get("config_key", ""), 0)
         if per_cat_id:
             ticket_cat = guild.get_channel(per_cat_id)
+            if not ticket_cat:
+                try:
+                    ticket_cat = await guild.fetch_channel(per_cat_id)
+                except Exception:
+                    ticket_cat = None
         if not ticket_cat:
             fallback_id = CONFIG.get("ticket_category_id", 0)
             if fallback_id:
                 ticket_cat = guild.get_channel(fallback_id)
+                if not ticket_cat:
+                    try:
+                        ticket_cat = await guild.fetch_channel(fallback_id)
+                    except Exception:
+                        ticket_cat = None
         if not ticket_cat:
             # Auto-find or create a category matching this ticket type
             cat_name = cat.get("cat_name", f"{cat['label']} Tickets")
@@ -716,8 +825,11 @@ async def _open_ticket(interaction: discord.Interaction, category_id: str) -> No
         )
 
         DB.execute(
-            "INSERT INTO void_tickets (channel_id, guild_id, user_id, category, created_at) VALUES (?,?,?,?,?)",
-            (str(channel.id), str(guild.id), str(interaction.user.id), category_id, now_iso())
+            """INSERT INTO tickets
+               (channel_id, guild_id, bot_source, discord_id, category, type, opened_at, ticket_num)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (str(channel.id), str(guild.id), 'void',
+             str(interaction.user.id), category_id, category_id, now_iso(), f"{num:04d}")
         )
         DB.commit()
 
@@ -825,7 +937,7 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
         channel = interaction.channel
 
         ticket = DB.execute(
-            "SELECT * FROM void_tickets WHERE channel_id=? AND status='open'",
+            "SELECT * FROM tickets WHERE channel_id=? AND status='open'",
             (str(channel.id),)
         ).fetchone()
         if not ticket:
@@ -839,7 +951,7 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
             )
             return
 
-        user_id = int(ticket["user_id"])
+        user_id = int(ticket["discord_id"])
 
         prod = self.product
         dur  = self.duration
@@ -908,7 +1020,7 @@ class ConfirmPaymentNotesModal(discord.ui.Modal, title="Confirm Payment"):
 
         # Stamp ticket
         DB.execute(
-            "UPDATE void_tickets SET invoice_id=?, paid_at=? WHERE channel_id=?",
+            "UPDATE tickets SET invoice_id=?, paid_at=?, payment_status='confirmed' WHERE channel_id=?",
             (invoice_id, now_iso(), str(channel.id)),
         )
 
@@ -974,7 +1086,7 @@ class TicketControlView(discord.ui.View):
             )
             return
         ticket = DB.execute(
-            "SELECT * FROM void_tickets WHERE channel_id=? AND status='open'",
+            "SELECT * FROM tickets WHERE channel_id=? AND status='open'",
             (str(interaction.channel.id),)
         ).fetchone()
         if not ticket or ticket["category"] != "purchase":
@@ -998,7 +1110,7 @@ class TicketControlView(discord.ui.View):
             await interaction.response.send_message("Only staff can claim tickets.", ephemeral=True)
             return
         DB.execute(
-            "UPDATE void_tickets SET claimed_by=? WHERE channel_id=?",
+            "UPDATE tickets SET claimed_by=? WHERE channel_id=?",
             (str(interaction.user.id), str(interaction.channel.id))
         )
         DB.commit()
@@ -1025,8 +1137,8 @@ class TicketControlView(discord.ui.View):
         transcript = "\n".join(lines)
 
         DB.execute(
-            "UPDATE void_tickets SET status='closed', closed_at=?, transcript=? WHERE channel_id=?",
-            (now_iso(), transcript, str(interaction.channel.id))
+            "UPDATE tickets SET status='closed', closed_at=?, closed_by=?, transcript=? WHERE channel_id=?",
+            (now_iso(), str(interaction.user.id), transcript, str(interaction.channel.id))
         )
         DB.commit()
 
@@ -1071,7 +1183,7 @@ class VerifyCaptchaModal(discord.ui.Modal):
 
         # Check by Discord ID - tickets first, then payments
         ticket = DB.execute(
-            "SELECT invoice_id, product FROM void_tickets WHERE user_id=?", (user_id,)
+            "SELECT invoice_id, product FROM tickets WHERE discord_id=? AND bot_source='void'", (user_id,)
         ).fetchone()
         if not ticket:
             payment = DB.execute(
@@ -1391,12 +1503,18 @@ class _Health(BaseHTTPRequestHandler):
             if invoice_id:
                 # Legacy flow: check by invoice_id + validate discord_id matches
                 ticket = conn.execute(
-                    "SELECT user_id, product FROM void_tickets WHERE invoice_id=?",
+                    "SELECT discord_id, product FROM tickets WHERE invoice_id=?",
                     (invoice_id,)
                 ).fetchone()
                 if not ticket:
+                    # Fallback to payments table
+                    ticket = conn.execute(
+                        "SELECT discord_id, product FROM payments WHERE invoice_id=?",
+                        (invoice_id,)
+                    ).fetchone()
+                if not ticket:
                     resp = {"valid": False, "reason": "not_found"}
-                elif ticket["user_id"] != discord_id:
+                elif ticket["discord_id"] != discord_id:
                     resp = {"valid": False, "reason": "wrong_user"}
                 else:
                     resp = {"valid": True, "invoice_id": invoice_id,
@@ -1404,7 +1522,7 @@ class _Health(BaseHTTPRequestHandler):
             else:
                 # Discord-ID-only flow: check tickets then payments by discord_id
                 ticket = conn.execute(
-                    "SELECT invoice_id, product FROM void_tickets WHERE user_id=?",
+                    "SELECT invoice_id, product FROM tickets WHERE discord_id=?",
                     (discord_id,)
                 ).fetchone()
                 if ticket:

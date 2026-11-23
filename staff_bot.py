@@ -84,20 +84,29 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    # Create staff-side tables (main bot tables already exist)
+    # Shared tables: void_bot owns schema, staff_bot uses IF NOT EXISTS as a safety net
+    # (in case staff_bot starts before void_bot on first deploy)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS tickets (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_num      TEXT NOT NULL DEFAULT '0000',
+            channel_id      TEXT UNIQUE NOT NULL,
+            guild_id        TEXT NOT NULL DEFAULT '',
+            bot_source      TEXT NOT NULL DEFAULT 'staff',
             discord_id      TEXT NOT NULL,
-            channel_id      TEXT NOT NULL UNIQUE,
-            type            TEXT NOT NULL,
+            type            TEXT,
+            category        TEXT NOT NULL DEFAULT '',
             status          TEXT NOT NULL DEFAULT 'open',
+            claimed_by      TEXT,
             opened_at       TEXT NOT NULL,
             closed_at       TEXT,
             closed_by       TEXT,
             assigned_to     TEXT,
             payment_status  TEXT NOT NULL DEFAULT 'none',
+            invoice_id      TEXT,
+            paid_at         TEXT,
             resolution      TEXT,
+            transcript      TEXT,
             notes           TEXT
         );
         CREATE TABLE IF NOT EXISTS ticket_messages (
@@ -113,13 +122,47 @@ def init_db(path: str) -> sqlite3.Connection:
             discord_id   TEXT NOT NULL,
             key          TEXT NOT NULL,
             product      TEXT NOT NULL,
+            amount       TEXT,
+            method       TEXT,
             expires_at   TEXT,
             paid_at      TEXT NOT NULL,
             confirmed_by TEXT NOT NULL,
             notes        TEXT
         );
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT NOT NULL,
+            bot_source  TEXT NOT NULL DEFAULT 'staff',
+            action      TEXT NOT NULL,
+            actor_id    TEXT,
+            target_id   TEXT,
+            detail      TEXT
+        );
     """)
     conn.commit()
+    # Schema guards in case void_bot added columns staff_bot's minimal CREATE missed
+    for _migration in [
+        "ALTER TABLE tickets ADD COLUMN ticket_num TEXT NOT NULL DEFAULT '0000'",
+        "ALTER TABLE tickets ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'staff'",
+        "ALTER TABLE tickets ADD COLUMN category TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tickets ADD COLUMN type TEXT",
+        "ALTER TABLE tickets ADD COLUMN closed_by TEXT",
+        "ALTER TABLE tickets ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'none'",
+        "ALTER TABLE tickets ADD COLUMN invoice_id TEXT",
+        "ALTER TABLE tickets ADD COLUMN paid_at TEXT",
+        "ALTER TABLE tickets ADD COLUMN resolution TEXT",
+        "ALTER TABLE tickets ADD COLUMN transcript TEXT",
+        "ALTER TABLE tickets ADD COLUMN assigned_to TEXT",
+        "ALTER TABLE payments ADD COLUMN amount TEXT",
+        "ALTER TABLE payments ADD COLUMN method TEXT",
+        "ALTER TABLE audit_log ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'staff'",
+    ]:
+        try:
+            conn.execute(_migration)
+            conn.commit()
+        except Exception:
+            pass
     return conn
 
 def now_iso() -> str:
@@ -140,8 +183,8 @@ async def _get_member(guild: discord.Guild, user_id: int) -> Optional[discord.Me
 
 def audit_staff(action: str, actor_id: str = None, target_id: str = None, detail: str = None):
     DB.execute(
-        "INSERT INTO audit_log (timestamp, action, actor_id, target_id, detail) VALUES (?,?,?,?,?)",
-        (now_iso(), action, actor_id, target_id, detail)
+        "INSERT INTO audit_log (timestamp, bot_source, action, actor_id, target_id, detail) VALUES (?,?,?,?,?,?)",
+        (now_iso(), 'staff', action, actor_id, target_id, detail)
     )
     DB.commit()
 
@@ -485,10 +528,13 @@ class TicketTypeSelect(discord.ui.Select):
             await interaction.followup.send(embed=err_embed("Channel Error", f"Could not create ticket channel: {ex}"), ephemeral=True)
             return
 
-        # Write to DB
+        # Write to unified tickets table
         DB.execute(
-            "INSERT INTO tickets (discord_id, channel_id, type, status, opened_at) VALUES (?,?,?,?,?)",
-            (did, str(ch.id), ticket_type, "open", now_iso())
+            """INSERT INTO tickets
+               (discord_id, channel_id, guild_id, bot_source, type, category, status, opened_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (did, str(ch.id), str(interaction.guild.id), 'staff',
+             ticket_type, ticket_type, "open", now_iso())
         )
         DB.commit()
         audit_staff("TICKET_OPEN", actor_id=did, detail=f"type={ticket_type} channel={ch.id}")

@@ -306,7 +306,7 @@ def start_health_server(port: int):
 # Regular channel/interaction sends use discord.Embed; Components v2 JSON
 # is used only for log webhooks (sent via raw aiohttp in send_log).
 
-BRAND_COLOR = 0x3B82F6  # Customer brand blue
+BRAND_COLOR = 0x60A5FA  # Customer brand blue (lighter)
 
 def _make_embed(text: str, color: int = BRAND_COLOR) -> discord.Embed:
     """Convert markdown-formatted panel text into a discord.Embed.
@@ -915,21 +915,29 @@ def _ensure_tables():
         conn.execute(
             "INSERT OR IGNORE INTO ticket_counter (id, next_num) VALUES (1, 1)"
         )
-        # void_tickets is owned by void_bot but we read it - ensure it exists
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS void_tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id TEXT,
-                user_id TEXT,
-                category TEXT,
-                status TEXT DEFAULT 'open',
-                invoice_id TEXT,
-                paid_at TEXT,
-                closed_at TEXT,
-                transcript TEXT,
-                created_at TEXT
-            )"""
-        )
+        # Unified tickets table (void_bot owns schema; this is a safety net for first-deploy)
+        conn.execute("""CREATE TABLE IF NOT EXISTS tickets (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_num      TEXT NOT NULL DEFAULT '0000',
+            channel_id      TEXT UNIQUE NOT NULL,
+            guild_id        TEXT NOT NULL DEFAULT '',
+            bot_source      TEXT NOT NULL DEFAULT 'customer',
+            discord_id      TEXT NOT NULL,
+            type            TEXT,
+            category        TEXT NOT NULL DEFAULT '',
+            status          TEXT NOT NULL DEFAULT 'open',
+            claimed_by      TEXT,
+            opened_at       TEXT NOT NULL,
+            closed_at       TEXT,
+            closed_by       TEXT,
+            assigned_to     TEXT,
+            payment_status  TEXT NOT NULL DEFAULT 'none',
+            invoice_id      TEXT,
+            paid_at         TEXT,
+            resolution      TEXT,
+            transcript      TEXT,
+            notes           TEXT
+        )""")
         conn.commit()
 
 def _init_ticket_counter():
