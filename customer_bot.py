@@ -1751,17 +1751,10 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         # Direct DB lookup - no HTTP call needed (shared volume with void_bot)
         try:
             with get_db() as conn:
-                # Check unified tickets table first
                 ticket = conn.execute(
                     "SELECT discord_id FROM tickets WHERE invoice_id=?",
                     (invoice_id,)
                 ).fetchone()
-                # Fallback to payments table
-                if not ticket:
-                    ticket = conn.execute(
-                        "SELECT discord_id FROM payments WHERE invoice_id=?",
-                        (invoice_id,)
-                    ).fetchone()
         except Exception as ex:
             log.error("Verify DB lookup failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
             await interaction.followup.send(
