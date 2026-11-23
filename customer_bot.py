@@ -1751,7 +1751,7 @@ async def close_ticket(interaction: discord.Interaction, reason: str = "No reaso
 class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
     invoice_input = discord.ui.TextInput(
         label="Invoice ID",
-        placeholder="e.g. VD-XXXX-XXXX-XXXX-XXXX",
+        placeholder="e.g. INV-XXXX-XXXX-XXXX-XXXX",
         min_length=5,
         max_length=32,
     )

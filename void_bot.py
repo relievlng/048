@@ -289,7 +289,7 @@ def _gen_key(prefix: str = "VD") -> str:
 def _gen_invoice_id() -> str:
     charset = string.ascii_uppercase + string.digits
     parts = ["".join(secrets.choice(charset) for _ in range(4)) for _ in range(4)]
-    return "VD-" + "-".join(parts)
+    return "INV-" + "-".join(parts)
 
 async def _in_customer_or_void(client: discord.Client, user_id: int) -> tuple[bool, str]:
     """
