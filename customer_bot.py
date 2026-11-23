@@ -526,13 +526,13 @@ def _ticket_panel_payload() -> dict:
         # Re-Setup sits right after Setup in the panel
         if cat_id == "setup":
             body.append({"type": 14})
-            em_rs = _emoji_in_text("gear")
+            em_rs = _emoji_in_text("arrow")
             rs_prefix = f"{em_rs} " if em_rs else ""
             body.append(_v2_section(
                 f"{rs_prefix}**Re-Setup** - Already set up? Open a re-setup request",
                 "Re-Setup",
                 "ticket_open_resetup",
-                btn_emoji_name="gear",
+                btn_emoji_name="arrow",
                 btn_style=2,
             ))
     return _v2_container(body, accent=BRAND_COLOR)
@@ -1075,7 +1075,7 @@ async def _setup_emojis(guild: discord.Guild) -> None:
 TICKET_CATEGORIES = {
     "purchase":   {"label": "Purchase / Renewal", "cat_name": "Purchase-Renewal", "channel_prefix": "purchase",    "emoji_key": "crown",   "desc": "Purchase or renew a product",          "config_key": "ticket_cat_purchase"},
     "setup":      {"label": "Setup",              "cat_name": "Setup",            "channel_prefix": "setup",       "emoji_key": "description", "desc": "First time setup assistance",      "config_key": "ticket_cat_setup"},
-    "hwid_reset": {"label": "FAC Resetting",      "cat_name": "FAC-Resetting",    "channel_prefix": "fac-reset",   "emoji_key": "chip",    "desc": "Open a ticket to get authorised to FAC", "config_key": "ticket_cat_hwid_reset"},
+    "hwid_reset": {"label": "FAC Resetting",      "cat_name": "FAC-Resetting",    "channel_prefix": "fac-reset",   "emoji_key": "key",     "desc": "Open a ticket to get authorised to FAC", "config_key": "ticket_cat_hwid_reset"},
     "support":    {"label": "Support",            "cat_name": "Support",          "channel_prefix": "support",     "emoji_key": "support", "desc": "Product support or general enquiries", "config_key": "ticket_cat_support"},
     "management": {"label": "Management",         "cat_name": "Management",       "channel_prefix": "management",  "emoji_key": "shield",  "desc": "Account or management requests",       "config_key": "ticket_cat_management"},
 }
