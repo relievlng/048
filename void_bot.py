@@ -51,7 +51,7 @@ CONFIG = {
     "webhook_loader_events": env("WEBHOOK_CHEAT_LOADER_EVENTS", ""),
     "webhook_hwid_flags":    env("WEBHOOK_CHEAT_HWID_FLAGS",    ""),
     "db_path":              env("DB_PATH",                       "/data/keylock.db"),
-    "api_port":             env_int("VOID_PORT", env_int("PORT", 8081)),
+    "api_port":             env_int("PORT", env_int("VOID_PORT", 8081)),
     "internal_api_key":     env("INTERNAL_API_KEY", ""),
     "customer_guild_id":    env_int("VOID_CUSTOMER_GUILD_ID"),
     "key_prefix":           env("VOID_KEY_PREFIX", "VD"),
