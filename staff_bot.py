@@ -157,6 +157,7 @@ def init_db(path: str) -> sqlite3.Connection:
         "ALTER TABLE payments ADD COLUMN amount TEXT",
         "ALTER TABLE payments ADD COLUMN method TEXT",
         "ALTER TABLE audit_log ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'staff'",
+        "ALTER TABLE key_pool ADD COLUMN invoice_id TEXT",
     ]:
         try:
             conn.execute(_migration)
@@ -1090,6 +1091,7 @@ admin_only = staff_only  # admin commands use same role gate on the staff bot
     product="private or public (both work in the loader)",
     duration="How long the key is valid for",
     deliver_to="DM the key directly to this user",
+    invoice_id="Invoice/payment ID to link this key to (required for paid orders)",
     notes="Admin notes attached to this key"
 )
 @app_commands.autocomplete(duration=autocomplete_duration, product=autocomplete_product)
@@ -1098,6 +1100,7 @@ async def cmd_keygen(i: discord.Interaction,
                      product: str = "private",
                      duration: Optional[str] = "lifetime",
                      deliver_to: Optional[discord.User] = None,
+                     invoice_id: Optional[str] = None,
                      notes: Optional[str] = None):
     try:
         await i.response.defer(ephemeral=True)
@@ -1139,13 +1142,17 @@ async def cmd_keygen(i: discord.Interaction,
             return
 
     vis = "public" if prod == "public" else "private"
+    inv = (invoice_id or "").strip().upper() or None
     k = gen_key(CONFIG["key_prefix"])
     DB.execute(
-        "INSERT OR IGNORE INTO key_pool (key,product,visibility,created_at,expires_at,created_by,notes) VALUES (?,?,?,?,?,?,?)",
-        (k, prod, vis, now_iso(), exp_iso, str(i.user.id), notes)
+        "INSERT OR IGNORE INTO key_pool "
+        "(key,product,visibility,created_at,expires_at,created_by,notes,invoice_id) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (k, prod, vis, now_iso(), exp_iso, str(i.user.id), notes, inv)
     )
     DB.commit()
-    audit("KEYGEN", actor_id=str(i.user.id), detail=f"product={prod} duration={dur_key}")
+    audit("KEYGEN", actor_id=str(i.user.id),
+          detail=f"product={prod} duration={dur_key}" + (f" invoice={inv}" if inv else ""))
 
     # If delivering, link the key to the user's Discord ID immediately
     if deliver_to:
@@ -1165,6 +1172,18 @@ async def cmd_keygen(i: discord.Interaction,
             DB.commit()
             audit("KEY_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
                   detail=f"key={k[:20]} product={prod}")
+
+        # Write a payments record so the invoice is discoverable across bots
+        if inv:
+            DB.execute(
+                """INSERT OR IGNORE INTO payments
+                   (invoice_id, discord_id, key, product, amount, method, expires_at, paid_at, confirmed_by)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (inv, str(deliver_to.id), k, prod, None, None, exp_iso, now_iso(), str(i.user.id))
+            )
+            DB.commit()
+            audit("PAYMENT_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+                  detail=f"invoice={inv} key={k[:20]}")
 
     prod_icon = "🌐" if prod == "public" else "🔒"
     dm_status = None
@@ -1198,6 +1217,8 @@ async def cmd_keygen(i: discord.Interaction,
     result_embed.add_field(name="Valid For", value=f"`{expires_label}`", inline=True)
     result_embed.add_field(name="​", value="​", inline=True)
     result_embed.add_field(name="License Key", value=f"```\n{k}\n```", inline=False)
+    if inv:
+        result_embed.add_field(name="Invoice ID", value=f"`{inv}`", inline=False)
     if dm_status:
         result_embed.add_field(name="Delivery", value=dm_status, inline=False)
     if notes:

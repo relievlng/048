@@ -177,6 +177,15 @@ def init_db(path: str) -> sqlite3.Connection:
             channel_id  TEXT NOT NULL,
             message_id  TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS login_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id  TEXT NOT NULL,
+            hwid        TEXT,
+            ip          TEXT,
+            timestamp   TEXT NOT NULL,
+            product     TEXT,
+            status      TEXT NOT NULL DEFAULT 'ok'
+        );
         CREATE TABLE IF NOT EXISTS payments (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             invoice_id   TEXT UNIQUE NOT NULL,
@@ -215,6 +224,7 @@ def init_db(path: str) -> sqlite3.Connection:
         "ALTER TABLE tickets ADD COLUMN transcript TEXT",
         "ALTER TABLE tickets ADD COLUMN assigned_to TEXT",
         "ALTER TABLE audit_log ADD COLUMN bot_source TEXT NOT NULL DEFAULT 'void'",
+        "ALTER TABLE key_pool ADD COLUMN invoice_id TEXT",
     ]:
         try:
             conn.execute(migration)
@@ -1468,17 +1478,197 @@ async def cmd_setup(interaction: discord.Interaction):
 
 # ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 
+def _api_key_ok(body: dict) -> bool:
+    expected = CONFIG.get("internal_api_key", "")
+    return not expected or body.get("api_key") == expected
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _auth_handler(body: dict) -> dict:
+    """
+    Validate a cheat license key + HWID.
+
+    Request fields:
+        key   (required) - the license key string
+        hwid  (required) - machine fingerprint (sha256 hex, max 128 chars)
+        ip    (optional) - client IP for logging
+
+    Response on success:
+        {"ok": true, "product": "...", "expires": "...|null",
+         "discord_id": "...", "resets_left": N}
+
+    Response on failure:
+        {"ok": false, "error": "invalid_key|banned|expired|hwid_mismatch|inactive"}
+    """
+    key   = (body.get("key")  or "").strip().upper()
+    hwid  = (body.get("hwid") or "").strip()[:128]
+    ip    = (body.get("ip")   or "").strip()[:64]
+
+    if not key or not hwid:
+        return {"ok": False, "error": "missing_fields"}
+
+    now_str = _now_iso()
+    max_resets = CONFIG.get("max_hwid_resets", 3)
+
+    try:
+        conn = sqlite3.connect(CONFIG["db_path"])
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        user = conn.execute(
+            "SELECT discord_id, hwid, product, status, expires_at, hwid_resets, ban_reason "
+            "FROM users WHERE key=?",
+            (key,)
+        ).fetchone()
+
+        if not user:
+            conn.close()
+            return {"ok": False, "error": "invalid_key"}
+
+        did     = user["discord_id"]
+        product = user["product"]
+        status  = user["status"]
+
+        # Status checks
+        if status == "banned":
+            conn.execute(
+                "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                (did, hwid, ip, now_str, product, "banned")
+            )
+            conn.commit()
+            conn.close()
+            return {"ok": False, "error": "banned"}
+
+        if status != "active":
+            conn.execute(
+                "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                (did, hwid, ip, now_str, product, "inactive")
+            )
+            conn.commit()
+            conn.close()
+            return {"ok": False, "error": "inactive"}
+
+        # Expiry check
+        expires = user["expires_at"]
+        if expires and expires < now_str:
+            conn.execute(
+                "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                (did, hwid, ip, now_str, product, "expired")
+            )
+            conn.commit()
+            conn.close()
+            return {"ok": False, "error": "expired"}
+
+        # HWID check / binding
+        stored_hwid = user["hwid"]
+        if not stored_hwid:
+            # First run - bind HWID
+            conn.execute(
+                "UPDATE users SET hwid=?, last_seen=?, ip_last=? WHERE discord_id=?",
+                (hwid, now_str, ip or None, did)
+            )
+        elif stored_hwid != hwid:
+            conn.execute(
+                "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+                (did, hwid, ip, now_str, product, "hwid_mismatch")
+            )
+            conn.commit()
+            conn.close()
+            return {"ok": False, "error": "hwid_mismatch"}
+        else:
+            # Matching HWID - update last_seen
+            conn.execute(
+                "UPDATE users SET last_seen=?, ip_last=? WHERE discord_id=?",
+                (now_str, ip or None, did)
+            )
+
+        # Log successful auth
+        conn.execute(
+            "INSERT INTO login_log (discord_id,hwid,ip,timestamp,product,status) VALUES (?,?,?,?,?,?)",
+            (did, hwid, ip, now_str, product, "ok")
+        )
+        conn.commit()
+        resets_used = user["hwid_resets"] or 0
+        conn.close()
+
+        return {
+            "ok":         True,
+            "product":    product,
+            "expires":    expires,
+            "discord_id": did,
+            "resets_left": max(0, max_resets - resets_used),
+        }
+
+    except Exception as ex:
+        log.error("[auth] DB error: %s", ex)
+        return {"ok": False, "error": "server_error"}
+
+def _verify_handler(body: dict) -> dict:
+    """Legacy /verify endpoint for customer Discord role assignment."""
+    invoice_id = (body.get("invoice_id") or "").strip().upper()
+    discord_id = str(body.get("discord_id") or "").strip()
+    try:
+        conn = sqlite3.connect(CONFIG["db_path"])
+        conn.row_factory = sqlite3.Row
+        if invoice_id:
+            ticket = conn.execute(
+                "SELECT discord_id, product FROM tickets WHERE invoice_id=?",
+                (invoice_id,)
+            ).fetchone()
+            if not ticket:
+                ticket = conn.execute(
+                    "SELECT discord_id, product FROM payments WHERE invoice_id=?",
+                    (invoice_id,)
+                ).fetchone()
+            if not ticket:
+                resp = {"valid": False, "reason": "not_found"}
+            elif ticket["discord_id"] != discord_id:
+                resp = {"valid": False, "reason": "wrong_user"}
+            else:
+                resp = {"valid": True, "invoice_id": invoice_id,
+                        "product": ticket["product"] if "product" in ticket.keys() else None}
+        else:
+            ticket = conn.execute(
+                "SELECT invoice_id, product FROM tickets WHERE discord_id=?",
+                (discord_id,)
+            ).fetchone()
+            if ticket:
+                resp = {"valid": True, "invoice_id": ticket["invoice_id"],
+                        "product": ticket["product"] if "product" in ticket.keys() else None}
+            else:
+                payment = conn.execute(
+                    "SELECT invoice_id, product FROM payments WHERE discord_id=?",
+                    (discord_id,)
+                ).fetchone()
+                if payment:
+                    resp = {"valid": True, "invoice_id": payment["invoice_id"],
+                            "product": payment["product"] if "product" in payment.keys() else None}
+                else:
+                    resp = {"valid": False, "reason": "not_found"}
+        conn.close()
+    except Exception as ex:
+        resp = {"error": str(ex)}
+    return resp
+
 class _Health(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+    def _send_json(self, data: dict, status: int = 200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"ok")
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/ping":
+            self._send_json({"ok": True, "service": "048-void"})
+        else:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
 
     def do_POST(self):
-        if self.path != "/verify":
-            self.send_response(404)
-            self.end_headers()
-            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -1487,73 +1677,17 @@ class _Health(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        expected_key = CONFIG.get("internal_api_key", "")
-        if expected_key and body.get("api_key") != expected_key:
-            self.send_response(403)
-            self.end_headers()
-            self.wfile.write(b'{"error":"forbidden"}')
+        if not _api_key_ok(body):
+            self._send_json({"error": "forbidden"}, 403)
             return
 
-        invoice_id = (body.get("invoice_id") or "").strip().upper()
-        discord_id = str(body.get("discord_id") or "").strip()
-
-        try:
-            conn = sqlite3.connect(CONFIG["db_path"])
-            conn.row_factory = sqlite3.Row
-            if invoice_id:
-                # Legacy flow: check by invoice_id + validate discord_id matches
-                ticket = conn.execute(
-                    "SELECT discord_id, product FROM tickets WHERE invoice_id=?",
-                    (invoice_id,)
-                ).fetchone()
-                if not ticket:
-                    # Fallback to payments table
-                    ticket = conn.execute(
-                        "SELECT discord_id, product FROM payments WHERE invoice_id=?",
-                        (invoice_id,)
-                    ).fetchone()
-                if not ticket:
-                    resp = {"valid": False, "reason": "not_found"}
-                elif ticket["discord_id"] != discord_id:
-                    resp = {"valid": False, "reason": "wrong_user"}
-                else:
-                    resp = {"valid": True, "invoice_id": invoice_id,
-                            "product": ticket["product"] if "product" in ticket.keys() else None}
-            else:
-                # Discord-ID-only flow: check tickets then payments by discord_id
-                ticket = conn.execute(
-                    "SELECT invoice_id, product FROM tickets WHERE discord_id=?",
-                    (discord_id,)
-                ).fetchone()
-                if ticket:
-                    resp = {"valid": True, "invoice_id": ticket["invoice_id"],
-                            "product": ticket["product"] if "product" in ticket.keys() else None}
-                else:
-                    payment = conn.execute(
-                        "SELECT invoice_id, product FROM payments WHERE discord_id=?",
-                        (discord_id,)
-                    ).fetchone()
-                    if payment:
-                        resp = {"valid": True, "invoice_id": payment["invoice_id"],
-                                "product": payment["product"] if "product" in payment.keys() else None}
-                    else:
-                        resp = {"valid": False, "reason": "not_found"}
-            conn.close()
-        except Exception as ex:
-            resp_data = json.dumps({"error": str(ex)}).encode()
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(resp_data)))
+        if self.path == "/auth":
+            self._send_json(_auth_handler(body))
+        elif self.path == "/verify":
+            self._send_json(_verify_handler(body))
+        else:
+            self.send_response(404)
             self.end_headers()
-            self.wfile.write(resp_data)
-            return
-
-        resp_data = json.dumps(resp).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(resp_data)))
-        self.end_headers()
-        self.wfile.write(resp_data)
 
     def log_message(self, *args):
         pass
