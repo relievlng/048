@@ -331,6 +331,28 @@ def start_health_server(port: int):
 
 BRAND_COLOR = 0x60A5FA  # Customer brand blue (lighter)
 
+async def _void_verify(invoice_id: str, discord_id: str) -> dict:
+    """
+    Call void_bot's /verify endpoint to validate an invoice ID.
+    Returns the JSON response dict, or raises RuntimeError on failure.
+    Response shape:
+      {"valid": True,  "invoice_id": "...", "product": "..."}
+      {"valid": False, "reason": "not_found" | "wrong_user"}
+      {"error": "..."}
+    """
+    base_url = CONFIG.get("void_bot_url", "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("VOID_BOT_URL not configured")
+    api_key = CONFIG.get("internal_api_key", "")
+    payload = {"api_key": api_key, "invoice_id": invoice_id, "discord_id": discord_id}
+    async with aiohttp.ClientSession() as sess:
+        async with sess.post(
+            f"{base_url}/verify",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            return await resp.json()
+
 def _make_embed(text: str, color: int = BRAND_COLOR) -> discord.Embed:
     """Convert markdown-formatted panel text into a discord.Embed.
     The first '## Heading' line becomes the embed title; the rest is description.
@@ -1476,38 +1498,32 @@ class SetupInvoiceModal(discord.ui.Modal, title="Enter Your Invoice ID"):
         invoice_id = self.invoice_input.value.strip().upper()
         member     = interaction.user
 
-        product    = None
-        expires_at = None
+        # Call void_bot's /verify API - no discord_id check for setup (just validate invoice exists)
         try:
-            with get_db() as conn:
-                # Check payments first (staff_bot confirmed purchases)
-                row = conn.execute(
-                    "SELECT product, expires_at FROM payments WHERE invoice_id=?",
-                    (invoice_id,)
-                ).fetchone()
-                # Fallback to tickets (void_bot confirmed purchases)
-                if not row:
-                    row = conn.execute(
-                        "SELECT product, expires_at FROM tickets WHERE invoice_id=?",
-                        (invoice_id,)
-                    ).fetchone()
-                if row:
-                    product    = row["product"]
-                    expires_at = row["expires_at"]
+            result = await _void_verify(invoice_id, str(member.id))
         except Exception as ex:
-            log.error("Setup invoice lookup failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
+            log.error("Setup invoice API failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
             await interaction.followup.send(
-                "Database error. Contact staff.", ephemeral=True
+                "Could not reach auth server. Contact staff.", ephemeral=True
             )
             return
 
-        if not row:
-            await interaction.followup.send(
-                "Invoice ID not found. Make sure your purchase has been confirmed by staff. "
-                "Contact staff if you believe this is wrong.",
-                ephemeral=True,
-            )
+        if result.get("error") or not result.get("valid"):
+            reason = result.get("reason", "unknown")
+            if reason == "wrong_user":
+                await interaction.followup.send(
+                    "That Invoice ID belongs to a different Discord account. Contact staff if this is wrong.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Invoice ID not found. Make sure your purchase has been confirmed by staff.",
+                    ephemeral=True,
+                )
             return
+
+        product    = result.get("product")
+        expires_at = None  # /verify endpoint doesn't return expires_at; shown as N/A
 
         await open_ticket(
             interaction, "setup",
@@ -1869,42 +1885,38 @@ class VerifyModal(discord.ui.Modal, title="Purchase Verification"):
         member     = interaction.user
         guild      = interaction.guild
 
-        # Direct DB lookup - no HTTP call needed (shared volume with void_bot)
-        # tickets: written by void_bot when payment confirmed via void server
-        # payments: written by staff_bot when payment confirmed via staff server
+        # Call void_bot's /verify API (avoids shared-volume requirement)
         try:
-            with get_db() as conn:
-                ticket = conn.execute(
-                    "SELECT discord_id FROM tickets WHERE invoice_id=?",
-                    (invoice_id,)
-                ).fetchone()
-                if not ticket:
-                    ticket = conn.execute(
-                        "SELECT discord_id FROM payments WHERE invoice_id=?",
-                        (invoice_id,)
-                    ).fetchone()
+            result = await _void_verify(invoice_id, str(member.id))
         except Exception as ex:
-            log.error("Verify DB lookup failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
+            log.error("Verify API call failed user=%s invoice=%s: %s", member.id, invoice_id, ex)
             await interaction.followup.send(
-                "Verification failed - database error. Contact staff.", ephemeral=True
+                "Verification failed - could not reach auth server. Contact staff.", ephemeral=True
             )
             return
 
-        if not ticket:
+        if result.get("error"):
+            log.error("Verify API error user=%s invoice=%s: %s", member.id, invoice_id, result["error"])
             await interaction.followup.send(
-                "Invoice ID not found. Double-check the ID from your DM and try again.",
-                ephemeral=True,
+                "Verification failed - auth server error. Contact staff.", ephemeral=True
             )
             return
 
-        if ticket["discord_id"] != str(member.id):
-            await interaction.followup.send(
-                "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong.",
-                ephemeral=True,
-            )
+        if not result.get("valid"):
+            reason = result.get("reason", "unknown")
+            if reason == "wrong_user":
+                await interaction.followup.send(
+                    "That Invoice ID does not match your Discord account. Contact staff if you think this is wrong.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "Invoice ID not found. Double-check the ID from your DM and try again.",
+                    ephemeral=True,
+                )
             return
 
-        log.info("Verify DB hit user=%s invoice=%s", member.id, invoice_id)
+        log.info("Verify API hit user=%s invoice=%s", member.id, invoice_id)
 
         # Assign verified role
         verified_role = guild.get_role(CONFIG["verified_role_id"]) if guild else None
@@ -2273,43 +2285,19 @@ async def close_cmd(interaction: discord.Interaction):
         return
     await close_ticket(interaction)
 
-@bot.tree.command(name="debug-db", description="[Admin] Show DB stats and invoice lookup.")
-@app_commands.describe(invoice_id="Optional invoice ID to look up directly")
+@bot.tree.command(name="debug-verify", description="[Admin] Test invoice lookup via void_bot API.")
+@app_commands.describe(invoice_id="Invoice ID to test", discord_id="Discord user ID to check against")
 @app_commands.checks.has_role(CONFIG["admin_role_id"])
-async def debug_db(interaction: discord.Interaction, invoice_id: Optional[str] = None):
+async def debug_verify(interaction: discord.Interaction, invoice_id: str, discord_id: str = "0"):
     await interaction.response.defer(ephemeral=True)
+    inv = invoice_id.strip().upper()
+    void_url = CONFIG.get("void_bot_url", "(not set)")
+    lines = [f"**void_bot_url:** `{void_url}`", f"**Lookup:** `{inv}` for discord_id=`{discord_id}`"]
     try:
-        with get_db() as conn:
-            t_count  = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
-            p_count  = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
-            t_inv    = conn.execute("SELECT COUNT(*) FROM tickets  WHERE invoice_id IS NOT NULL").fetchone()[0]
-            p_inv    = conn.execute("SELECT COUNT(*) FROM payments WHERE invoice_id IS NOT NULL").fetchone()[0]
-            db_path  = CONFIG.get("db_path", "?")
-
-            lines = [
-                f"**DB path:** `{db_path}`",
-                f"**tickets:** {t_count} rows, {t_inv} with invoice_id",
-                f"**payments:** {p_count} rows, {p_inv} with invoice_id",
-            ]
-
-            if invoice_id:
-                inv = invoice_id.strip().upper()
-                rt = conn.execute("SELECT discord_id, product, expires_at FROM tickets  WHERE invoice_id=?", (inv,)).fetchone()
-                rp = conn.execute("SELECT discord_id, product, expires_at FROM payments WHERE invoice_id=?", (inv,)).fetchone()
-                lines.append(f"\n**Lookup:** `{inv}`")
-                if rt:
-                    lines.append(f"tickets  -> discord_id={rt['discord_id']} product={rt['product']}")
-                else:
-                    lines.append("tickets  -> NOT FOUND")
-                if rp:
-                    lines.append(f"payments -> discord_id={rp['discord_id']} product={rp['product']}")
-                else:
-                    lines.append("payments -> NOT FOUND")
-
+        result = await _void_verify(inv, discord_id)
+        lines.append(f"**Response:** `{result}`")
     except Exception as ex:
-        await interaction.followup.send(f"DB error: `{ex}`", ephemeral=True)
-        return
-
+        lines.append(f"**Error:** `{ex}`")
     await interaction.followup.send("\n".join(lines), ephemeral=True)
 
 
