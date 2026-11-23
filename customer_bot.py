@@ -1051,10 +1051,21 @@ def _ensure_tables():
             payment_status  TEXT NOT NULL DEFAULT 'none',
             invoice_id      TEXT,
             paid_at         TEXT,
+            product         TEXT,
+            expires_at      TEXT,
             resolution      TEXT,
             transcript      TEXT,
             notes           TEXT
         )""")
+        # Migration: add columns that may be missing on existing DBs
+        for _col_sql in [
+            "ALTER TABLE tickets ADD COLUMN product    TEXT",
+            "ALTER TABLE tickets ADD COLUMN expires_at TEXT",
+        ]:
+            try:
+                conn.execute(_col_sql)
+            except Exception:
+                pass  # column already exists
         # payments table is owned by staff_bot; create here as safety net for shared DB
         conn.execute("""CREATE TABLE IF NOT EXISTS payments (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
