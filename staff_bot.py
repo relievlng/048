@@ -63,6 +63,9 @@ CONFIG = {
     "max_hwid_resets":     env_int("MAX_HWID_RESETS", 1),
     "key_prefix":          env("KEY_PREFIX", "KL"),
     "api_port":            env_int("PORT", 8080),
+    # Changelog fan-out webhooks (staff posts -> these targets)
+    "void_cl_webhook":     env("VOID_MAIN_CHANGELOG_WEBHOOK",  ""),
+    "customer_cl_webhook": env("CUSTOMER_CHANGELOG_WEBHOOK",   ""),
 }
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
@@ -434,7 +437,6 @@ class StaffBot(discord.Client):
             {"name": "MAIN BOT LOGS",     "key": "MAIN",     "channels": [
                 "purchases","verifications","tickets-opened","tickets-closed",
                 "ticket-transcripts","ticket-notes","key-generated","bans","automod",
-                "changelogs"
             ]},
             {"name": "CUSTOMER BOT LOGS", "key": "CUSTOMER", "channels": [
                 "verifications","hwid-resets",
@@ -2630,50 +2632,112 @@ async def cmd_pin(i: discord.Interaction, message_id: str, channel: Optional[dis
     await webhook_log(log_e)
 
 
-# ─── CHANGELOG VIEWER ────────────────────────────────────────────────────────
+# ─── CHANGELOG POSTER (staff Discord is source, fans out to customer + void) ──
 
-@app_commands.command(name="changelogs", description="View recent changelogs posted via void_bot")
-@app_commands.describe(limit="Number of entries to show (default 5, max 20)")
-async def cmd_changelogs(i: discord.Interaction, limit: int = 5):
+class ChangelogModal(discord.ui.Modal, title="Post Changelog"):
+    product = discord.ui.TextInput(
+        label="Product",
+        placeholder="e.g. Void Bypass",
+        max_length=80,
+    )
+    version = discord.ui.TextInput(
+        label="Version / Date Label",
+        placeholder="e.g. v1.4.2 or 2026-11-23",
+        max_length=40,
+    )
+    added = discord.ui.TextInput(
+        label="Added / Changed",
+        style=discord.TextStyle.paragraph,
+        placeholder="- New feature\n- Improved X",
+        max_length=1800,
+    )
+    removed = discord.ui.TextInput(
+        label="Removed / Fixed (optional)",
+        style=discord.TextStyle.paragraph,
+        placeholder="- Removed Y\n- Fixed crash with Z",
+        required=False,
+        max_length=1000,
+    )
+
+    async def on_submit(self, i: discord.Interaction):
+        await i.response.defer(ephemeral=True)
+
+        product_str = self.product.value.strip()
+        version_str = self.version.value.strip()
+        added_str   = self.added.value.strip()
+        removed_str = self.removed.value.strip() or None
+        poster_id   = str(i.user.id)
+        now_str     = ts()
+
+        # 1. Save to DB
+        DB.execute(
+            "INSERT INTO changelogs (product, date, added, removed, posted_by, posted_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (product_str, version_str, added_str, removed_str, poster_id, now_str),
+        )
+        DB.commit()
+
+        # 2. Build embed for fan-out (plain Discord embed, works in any channel)
+        color  = 0x5865F2
+        desc_parts = [f"**Added / Changed**\n{added_str}"]
+        if removed_str:
+            desc_parts.append(f"**Removed / Fixed**\n{removed_str}")
+        embed_payload = {
+            "embeds": [{
+                "title":       f"[CHANGELOG] {product_str} - {version_str}",
+                "description": "\n\n".join(desc_parts),
+                "color":       color,
+                "footer":      {"text": f"Posted by {i.user.display_name} - {now_str}"},
+            }]
+        }
+
+        # 3. Post to THIS staff channel (non-ephemeral so staff can see it)
+        staff_embed = discord.Embed(
+            title=f"[CHANGELOG] {product_str} - {version_str}",
+            description="\n\n".join(desc_parts),
+            color=color,
+        )
+        staff_embed.set_footer(text=f"Posted by {i.user} - {now_str}")
+        await i.channel.send(embed=staff_embed)
+
+        # 4. Fan out to void main + customer Discord via webhooks
+        async def _post_wh(url: str, label: str):
+            if not url:
+                return
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.post(url, json=embed_payload, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                        if r.status not in (200, 204):
+                            log.warning("[changelog] webhook %s returned %d", label, r.status)
+            except Exception as exc:
+                log.warning("[changelog] webhook %s failed: %s", label, exc)
+
+        void_url     = CONFIG.get("void_cl_webhook", "")
+        customer_url = CONFIG.get("customer_cl_webhook", "")
+        await asyncio.gather(
+            _post_wh(void_url,     "void_main"),
+            _post_wh(customer_url, "customer"),
+        )
+
+        targets = []
+        if void_url:
+            targets.append("main Discord")
+        if customer_url:
+            targets.append("customer Discord")
+        target_str = " and ".join(targets) if targets else "no external targets (webhooks not configured)"
+
+        await i.followup.send(
+            embed=ok_embed("Changelog Posted", f"Saved to DB and fanned out to: {target_str}."),
+            ephemeral=True,
+        )
+
+
+@app_commands.command(name="changelog", description="Post a changelog to staff, main, and customer Discord")
+async def cmd_changelog(i: discord.Interaction):
     if not is_staff(i):
         await i.response.send_message("No permission.", ephemeral=True)
         return
-    limit = max(1, min(limit, 20))
-    await i.response.defer(ephemeral=True)
-
-    rows = DB.execute(
-        "SELECT product, date, added, removed, posted_by, posted_at"
-        " FROM changelogs ORDER BY id DESC LIMIT ?",
-        (limit,)
-    ).fetchall()
-
-    if not rows:
-        await i.followup.send(
-            embed=warn_embed("No Changelogs", "No changelogs have been posted yet."),
-            ephemeral=True,
-        )
-        return
-
-    e = discord.Embed(
-        title=f"Recent Changelogs ({len(rows)} shown)",
-        color=BRAND_COLOR,
-    )
-    for row in rows:
-        added_preview   = (row["added"][:200] + "...") if len(row["added"]) > 200 else row["added"]
-        removed_preview = ""
-        if row["removed"]:
-            removed_preview = "\n**Removed:**\n" + (
-                (row["removed"][:100] + "...") if len(row["removed"]) > 100 else row["removed"]
-            )
-        poster = f"<@{row['posted_by']}>" if row["posted_by"].isdigit() else row["posted_by"]
-        value  = f"**Added:**\n{added_preview}{removed_preview}\n-# Posted by {poster}"
-        e.add_field(
-            name=f"{row['product']} - {row['date']}",
-            value=value[:1024],
-            inline=False,
-        )
-    e.set_footer(text=f"Requested by {i.user} - {ts()}")
-    await i.followup.send(embed=e, ephemeral=True)
+    await i.response.send_modal(ChangelogModal())
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -2693,7 +2757,7 @@ ALL_COMMANDS = [
     cmd_purgeexpired, cmd_wipeuser, cmd_invite,
     cmd_test, cmd_seed,
     cmd_pin,
-    cmd_changelogs,
+    cmd_changelog,
 ]
 
 async def main():
