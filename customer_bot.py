@@ -189,6 +189,8 @@ def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Shared DB with staff bot - wait for locks instead of raising immediately.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 def lookup_user(discord_id: str) -> Optional[sqlite3.Row]:

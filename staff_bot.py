@@ -87,6 +87,9 @@ def init_db(path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Two bots share this DB file now (staff writes, customer bot polls/writes);
+    # wait up to 5s for a lock instead of raising 'database is locked'.
+    conn.execute("PRAGMA busy_timeout=5000")
     # Shared tables: void_bot owns schema, staff_bot uses IF NOT EXISTS as a safety net
     # (in case staff_bot starts before void_bot on first deploy)
     conn.executescript("""
@@ -1107,8 +1110,8 @@ admin_only = staff_only  # admin commands use same role gate on the staff bot
 @app_commands.describe(
     product="private or public (both work in the loader)",
     duration="How long the key is valid for",
-    deliver_to="DM the key directly to this user",
-    invoice_id="Invoice/payment ID to link this key to (required for paid orders)",
+    deliver_to="DM the key directly to this user (optional)",
+    invoice_id="Optional - link this key to a payment/invoice ID",
     notes="Admin notes attached to this key"
 )
 @app_commands.autocomplete(duration=autocomplete_duration, product=autocomplete_product)
@@ -1125,119 +1128,144 @@ async def cmd_keygen(i: discord.Interaction,
         log.error("keygen defer failed: %s", e)
         return
 
-    prod = (product or "private").lower().strip()
-    dur_key = (duration or "lifetime").lower().replace(" ", "")
-    if dur_key not in DURATION_PRESETS:
-        opts = ", ".join(f"`{k}`" for k in DURATION_PRESETS)
-        await i.followup.send(embed=err_embed("Invalid Duration", f"Choose one of: {opts}"), ephemeral=True)
-        return
-
-    delta = DURATION_PRESETS[dur_key]
-    exp_iso = None
-    expires_label = "Lifetime"
-    if delta is not None:
-        exp_dt = datetime.now(timezone.utc) + delta
-        exp_iso = exp_dt.isoformat()
-        expires_label = exp_dt.strftime("%Y-%m-%d")
-
-    # Guild membership check when delivering to a user
-    if deliver_to:
-        in_guild, reason = await _member_in_guilds(
-            BOT, deliver_to.id,
-            CONFIG.get("main_guild_id", 0),
-            CONFIG.get("void_guild_id", 0),
-        )
-        if not in_guild:
-            await i.followup.send(
-                embed=err_embed(
-                    "Membership Check Failed",
-                    f"{deliver_to.mention} is not a member of the customer or void Discord.\n"
-                    f"Key not generated. Confirm they have joined before delivering a key."
-                ),
-                ephemeral=True,
-            )
+    try:
+        prod = (product or "private").lower().strip()
+        dur_key = (duration or "lifetime").lower().replace(" ", "")
+        if dur_key not in DURATION_PRESETS:
+            opts = ", ".join(f"`{k}`" for k in DURATION_PRESETS)
+            await i.followup.send(embed=err_embed("Invalid Duration", f"Choose one of: {opts}"), ephemeral=True)
             return
 
-    vis = "public" if prod == "public" else "private"
-    inv = (invoice_id or "").strip().upper() or None
-    k = gen_key(CONFIG["key_prefix"])
-    DB.execute(
-        "INSERT OR IGNORE INTO key_pool "
-        "(key,product,visibility,created_at,expires_at,created_by,notes,invoice_id) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (k, prod, vis, now_iso(), exp_iso, str(i.user.id), notes, inv)
-    )
-    DB.commit()
-    audit("KEYGEN", actor_id=str(i.user.id),
-          detail=f"product={prod} duration={dur_key}" + (f" invoice={inv}" if inv else ""))
+        delta = DURATION_PRESETS[dur_key]
+        exp_iso = None
+        expires_label = "Lifetime"
+        if delta is not None:
+            exp_dt = datetime.now(timezone.utc) + delta
+            exp_iso = exp_dt.isoformat()
+            expires_label = exp_dt.strftime("%Y-%m-%d")
 
-    # If delivering, link the key to the user's Discord ID immediately
-    if deliver_to:
-        already = DB.execute(
-            "SELECT key FROM users WHERE discord_id=?", (str(deliver_to.id),)
-        ).fetchone()
-        if not already:
-            fac_key = gen_fac_key()
-            DB.execute(
-                """INSERT OR IGNORE INTO users
-                   (discord_id, key, product, status, registered_at, expires_at, fac_auth_key, notes)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (str(deliver_to.id), k, prod, "active", now_iso(), exp_iso, fac_key,
-                 f"Key delivered by {i.user} via /keygen")
+        # Guild membership check when delivering to a user
+        if deliver_to:
+            in_guild, reason = await _member_in_guilds(
+                BOT, deliver_to.id,
+                CONFIG.get("main_guild_id", 0),
+                CONFIG.get("void_guild_id", 0),
             )
-            DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (k,))
-            DB.commit()
-            audit("KEY_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-                  detail=f"key={k[:20]} product={prod}")
+            if not in_guild:
+                await i.followup.send(
+                    embed=err_embed(
+                        "Membership Check Failed",
+                        f"{deliver_to.mention} is not a member of the customer or void Discord.\n"
+                        f"Key not generated. Confirm they have joined before delivering a key."
+                    ),
+                    ephemeral=True,
+                )
+                return
 
-        # Write a payments record so the invoice is discoverable across bots
-        if inv:
-            DB.execute(
-                """INSERT OR IGNORE INTO payments
-                   (invoice_id, discord_id, key, product, amount, method, expires_at, paid_at, confirmed_by)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (inv, str(deliver_to.id), k, prod, None, None, exp_iso, now_iso(), str(i.user.id))
-            )
-            DB.commit()
-            audit("PAYMENT_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-                  detail=f"invoice={inv} key={k[:20]}")
-
-    prod_icon = "🌐" if prod == "public" else "🔒"
-    dm_status = None
-    if deliver_to:
-        # Queue delivery for the customer bot. The staff bot usually does not
-        # share a server with customers and cannot DM them directly, but the
-        # customer bot lives in the customer guild and polls this queue.
+        vis = "public" if prod == "public" else "private"
+        inv = (invoice_id or "").strip().upper() or None
+        k = gen_key(CONFIG["key_prefix"])
         DB.execute(
-            "INSERT INTO key_deliveries "
-            "(discord_id, key, product, expires_label, invoice_id, status, created_by, created_at) "
+            "INSERT OR IGNORE INTO key_pool "
+            "(key,product,visibility,created_at,expires_at,created_by,notes,invoice_id) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (str(deliver_to.id), k, prod, expires_label, inv, "pending", str(i.user.id), now_iso())
+            (k, prod, vis, now_iso(), exp_iso, str(i.user.id), notes, inv)
         )
         DB.commit()
-        audit("KEY_QUEUED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
-              detail=f"key={k[:20]} product={prod}")
-        dm_status = f"Queued - the customer bot will DM {deliver_to.mention} within a few seconds"
+        audit("KEYGEN", actor_id=str(i.user.id),
+              detail=f"product={prod} duration={dur_key}" + (f" invoice={inv}" if inv else ""))
 
-    linked_note = " Key linked to Discord ID." if deliver_to else " Key added to pool (unclaimed)."
-    result_embed = discord.Embed(
-        title="Key Generated",
-        description=f"New `{prod}` key created.{linked_note}",
-        color=discord.Color.green(),
-    )
-    result_embed.add_field(name="Product", value=f"{prod_icon} `{prod}`", inline=True)
-    result_embed.add_field(name="Valid For", value=f"`{expires_label}`", inline=True)
-    result_embed.add_field(name="​", value="​", inline=True)
-    result_embed.add_field(name="License Key", value=f"```\n{k}\n```", inline=False)
-    if inv:
-        result_embed.add_field(name="Invoice ID", value=f"`{inv}`", inline=False)
-    if dm_status:
-        result_embed.add_field(name="Delivery", value=dm_status, inline=False)
-    if notes:
-        result_embed.add_field(name="Notes", value=notes, inline=False)
-    result_embed.set_footer(text=f"By {i.user} - {ts()}")
-    await i.followup.send(embed=result_embed, ephemeral=True)
-    await BOT.log_embed(result_embed)
+        # If delivering, link the key to the user's Discord ID immediately
+        if deliver_to:
+            already = DB.execute(
+                "SELECT key FROM users WHERE discord_id=?", (str(deliver_to.id),)
+            ).fetchone()
+            if not already:
+                fac_key = gen_fac_key()
+                DB.execute(
+                    """INSERT OR IGNORE INTO users
+                       (discord_id, key, product, status, registered_at, expires_at, fac_auth_key, notes)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (str(deliver_to.id), k, prod, "active", now_iso(), exp_iso, fac_key,
+                     f"Key delivered by {i.user} via /keygen")
+                )
+                DB.execute("UPDATE key_pool SET claimed=1 WHERE key=?", (k,))
+                DB.commit()
+                audit("KEY_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+                      detail=f"key={k[:20]} product={prod}")
+
+            # Write a payments record so the invoice is discoverable across bots
+            if inv:
+                DB.execute(
+                    """INSERT OR IGNORE INTO payments
+                       (invoice_id, discord_id, key, product, amount, method, expires_at, paid_at, confirmed_by)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                    (inv, str(deliver_to.id), k, prod, None, None, exp_iso, now_iso(), str(i.user.id))
+                )
+                DB.commit()
+                audit("PAYMENT_LINKED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+                      detail=f"invoice={inv} key={k[:20]}")
+
+        prod_icon = "🌐" if prod == "public" else "🔒"
+        dm_status = None
+        if deliver_to:
+            # Queue delivery for the customer bot. The staff bot usually does not
+            # share a server with customers and cannot DM them directly, but the
+            # customer bot lives in the customer guild and polls this queue.
+            # CREATE IF NOT EXISTS guards against a stale DB that predates this table.
+            DB.execute("""CREATE TABLE IF NOT EXISTS key_deliveries (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id    TEXT NOT NULL,
+                key           TEXT NOT NULL,
+                product       TEXT,
+                expires_label TEXT,
+                invoice_id    TEXT,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                attempts      INTEGER NOT NULL DEFAULT 0,
+                last_error    TEXT,
+                created_by    TEXT,
+                created_at    TEXT NOT NULL DEFAULT '',
+                delivered_at  TEXT
+            )""")
+            DB.execute(
+                "INSERT INTO key_deliveries "
+                "(discord_id, key, product, expires_label, invoice_id, status, created_by, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (str(deliver_to.id), k, prod, expires_label, inv, "pending", str(i.user.id), now_iso())
+            )
+            DB.commit()
+            audit("KEY_QUEUED", actor_id=str(i.user.id), target_id=str(deliver_to.id),
+                  detail=f"key={k[:20]} product={prod}")
+            dm_status = f"Queued - the customer bot will DM {deliver_to.mention} within a few seconds"
+
+        linked_note = " Key linked to Discord ID." if deliver_to else " Key added to pool (unclaimed)."
+        result_embed = discord.Embed(
+            title="Key Generated",
+            description=f"New `{prod}` key created.{linked_note}",
+            color=discord.Color.green(),
+        )
+        result_embed.add_field(name="Product", value=f"{prod_icon} `{prod}`", inline=True)
+        result_embed.add_field(name="Valid For", value=f"`{expires_label}`", inline=True)
+        result_embed.add_field(name="​", value="​", inline=True)
+        result_embed.add_field(name="License Key", value=f"```\n{k}\n```", inline=False)
+        if inv:
+            result_embed.add_field(name="Invoice ID", value=f"`{inv}`", inline=False)
+        if dm_status:
+            result_embed.add_field(name="Delivery", value=dm_status, inline=False)
+        if notes:
+            result_embed.add_field(name="Notes", value=notes, inline=False)
+        result_embed.set_footer(text=f"By {i.user} - {ts()}")
+        await i.followup.send(embed=result_embed, ephemeral=True)
+        await BOT.log_embed(result_embed)
+    except Exception as e:
+        log.exception("keygen failed: %s", e)
+        try:
+            await i.followup.send(
+                embed=err_embed("Keygen Failed", f"Something went wrong:\n```{e}```"),
+                ephemeral=True,
+            )
+        except Exception:
+            pass
 
 
 @app_commands.command(name="lookup",
