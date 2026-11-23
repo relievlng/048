@@ -2319,96 +2319,139 @@ def _key_dm_embed(key: str, product: str, expires_label: str) -> discord.Embed:
     return em
 
 
-@tasks.loop(seconds=10)
-async def deliver_pending_keys():
-    """Poll the shared key_deliveries queue and DM each pending key from this bot."""
+def _fetch_pending_deliveries() -> list:
+    """Read pending delivery rows. Returns [] on any error (never raises)."""
+    conn = None
     try:
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT * FROM key_deliveries WHERE status='pending' AND attempts < ? "
-                "ORDER BY id ASC LIMIT 10",
-                (KEY_DELIVERY_MAX_ATTEMPTS,),
-            ).fetchall()
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM key_deliveries WHERE status='pending' AND attempts < ? "
+            "ORDER BY id ASC LIMIT 10",
+            (KEY_DELIVERY_MAX_ATTEMPTS,),
+        ).fetchall()
+        return list(rows)
     except Exception as ex:
         log.warning("[delivery] queue read failed: %s", ex)
-        return
+        return []
+    finally:
+        if conn is not None:
+            conn.close()
 
-    for row in rows:
-        did = str(row["discord_id"])
-        key = row["key"]
-        product = row["product"]
-        expires_label = row["expires_label"]
-        delivered = False
-        err = None
-        try:
-            user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
-            await user.send(embed=_key_dm_embed(key, product, expires_label))
-            delivered = True
-        except discord.Forbidden:
-            err = "User has DMs closed or does not share this server"
-        except discord.NotFound:
-            err = "User not found"
-        except Exception as ex:
-            err = str(ex)
 
-        now_s = datetime.now(timezone.utc).isoformat()
-        attempt_no = row["attempts"] + 1
-        with get_db() as conn:
-            if delivered:
-                conn.execute(
-                    "UPDATE key_deliveries SET status='delivered', delivered_at=?, "
-                    "attempts=?, last_error=NULL WHERE id=?",
-                    (now_s, attempt_no, row["id"]),
-                )
-            else:
-                new_status = "failed" if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS else "pending"
-                conn.execute(
-                    "UPDATE key_deliveries SET status=?, attempts=?, last_error=? WHERE id=?",
-                    (new_status, attempt_no, err, row["id"]),
-                )
-            conn.commit()
-
+def _mark_delivery(row_id: int, delivered: bool, attempt_no: int, err: Optional[str]):
+    """Update a delivery row's status. Never raises."""
+    conn = None
+    try:
+        conn = get_db()
         if delivered:
-            log.info("[delivery] key delivered user=%s key=%s", did, key[:12])
-            try:
-                await send_log(
-                    title="Key Delivered",
-                    description=f"<@{did}> (`{did}`) received their license key via DM.",
-                    color=0x57F287,
-                    webhook_key="wh_key_generated",
-                    fields=[
-                        {"name": "Product", "value": f"`{product or 'private'}`", "inline": True},
-                        {"name": "Valid For", "value": f"`{expires_label or 'Lifetime'}`", "inline": True},
-                    ],
-                    footer=f"User ID: {did}",
-                )
-            except Exception:
-                pass
+            conn.execute(
+                "UPDATE key_deliveries SET status='delivered', delivered_at=?, "
+                "attempts=?, last_error=NULL WHERE id=?",
+                (datetime.now(timezone.utc).isoformat(), attempt_no, row_id),
+            )
         else:
-            log.warning("[delivery] DM failed user=%s attempt=%d err=%s", did, attempt_no, err)
-            if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS:
+            new_status = "failed" if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS else "pending"
+            conn.execute(
+                "UPDATE key_deliveries SET status=?, attempts=?, last_error=? WHERE id=?",
+                (new_status, attempt_no, err, row_id),
+            )
+        conn.commit()
+    except Exception as ex:
+        log.warning("[delivery] status update failed id=%s: %s", row_id, ex)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+@tasks.loop(seconds=10)
+async def deliver_pending_keys():
+    """Poll the shared key_deliveries queue and DM each pending key from this bot.
+
+    Wrapped so no single failure can kill the loop - a dead loop would stop all
+    future deliveries silently.
+    """
+    try:
+        rows = _fetch_pending_deliveries()
+        if not rows:
+            return
+        log.info("[delivery] %d pending key delivery(ies) to process", len(rows))
+
+        for row in rows:
+            did = str(row["discord_id"])
+            key = row["key"]
+            product = row["product"]
+            expires_label = row["expires_label"]
+            attempt_no = row["attempts"] + 1
+            delivered = False
+            err = None
+            try:
+                user = bot.get_user(int(did)) or await bot.fetch_user(int(did))
+                await user.send(embed=_key_dm_embed(key, product, expires_label))
+                delivered = True
+            except discord.Forbidden:
+                err = "User has DMs closed or does not share this server"
+            except discord.NotFound:
+                err = "User not found by ID"
+            except Exception as ex:
+                err = str(ex)
+
+            _mark_delivery(row["id"], delivered, attempt_no, err)
+
+            if delivered:
+                log.info("[delivery] key delivered user=%s key=%s", did, key[:12])
                 try:
                     await send_log(
-                        title="Key Delivery Failed",
-                        description=(
-                            f"Could not DM a license key to <@{did}> (`{did}`) after "
-                            f"{KEY_DELIVERY_MAX_ATTEMPTS} attempts."
-                        ),
-                        color=0xED4245,
+                        title="Key Delivered",
+                        description=f"<@{did}> (`{did}`) received their license key via DM.",
+                        color=0x57F287,
                         webhook_key="wh_key_generated",
                         fields=[
-                            {"name": "Reason", "value": err or "Unknown", "inline": False},
-                            {"name": "Key", "value": f"`{key}`", "inline": False},
+                            {"name": "Product", "value": f"`{product or 'private'}`", "inline": True},
+                            {"name": "Valid For", "value": f"`{expires_label or 'Lifetime'}`", "inline": True},
                         ],
                         footer=f"User ID: {did}",
                     )
                 except Exception:
                     pass
+            else:
+                log.warning("[delivery] DM failed user=%s attempt=%d/%d err=%s",
+                            did, attempt_no, KEY_DELIVERY_MAX_ATTEMPTS, err)
+                if attempt_no >= KEY_DELIVERY_MAX_ATTEMPTS:
+                    try:
+                        await send_log(
+                            title="Key Delivery Failed",
+                            description=(
+                                f"Could not DM a license key to <@{did}> (`{did}`) after "
+                                f"{KEY_DELIVERY_MAX_ATTEMPTS} attempts."
+                            ),
+                            color=0xED4245,
+                            webhook_key="wh_key_generated",
+                            fields=[
+                                {"name": "Reason", "value": err or "Unknown", "inline": False},
+                                {"name": "Key", "value": f"`{key}`", "inline": False},
+                            ],
+                            footer=f"User ID: {did}",
+                        )
+                    except Exception:
+                        pass
+    except Exception as ex:
+        # Last-resort guard: keep the loop alive no matter what.
+        log.exception("[delivery] poller tick crashed (loop stays alive): %s", ex)
 
 
 @deliver_pending_keys.before_loop
 async def _before_delivery_loop():
     await bot.wait_until_ready()
+
+
+@deliver_pending_keys.error
+async def _delivery_loop_error(exc: Exception):
+    """If the loop ever errors out, log it and restart it so delivery resumes."""
+    log.exception("[delivery] poller stopped on error, restarting: %s", exc)
+    try:
+        deliver_pending_keys.restart()
+    except Exception:
+        pass
 
 
 @bot.event
@@ -2450,7 +2493,17 @@ async def on_ready():
 
     if not deliver_pending_keys.is_running():
         deliver_pending_keys.start()
-        log.info("Key delivery queue poller started.")
+        # Boot diagnostic: confirm the poller is live and can see the shared queue.
+        try:
+            _dconn = get_db()
+            _pending = _dconn.execute(
+                "SELECT COUNT(*) FROM key_deliveries WHERE status='pending'"
+            ).fetchone()[0]
+            _dconn.close()
+            log.info("Key delivery poller started (db=%s, %d pending in queue)",
+                     CONFIG["db_path"], _pending)
+        except Exception as ex:
+            log.warning("Key delivery poller started, but queue read failed: %s", ex)
 
     guild = bot.get_guild(CONFIG["guild_id"])
     if not guild:
